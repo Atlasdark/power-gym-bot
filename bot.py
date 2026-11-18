@@ -44,7 +44,7 @@ TZ = ZoneInfo("America/Mexico_City")
 # ID de Telegram -> nombre EXACTO del dropdown "registrado_por" de la hoja.
 # Cada encargado manda /id al bot para saber su número.
 ENCARGADOS = {
-    # 111111111: "ADOLFO",
+    9243005111: "ADOLFO",
     # 222222222: "DIEGO",
     # 333333333: "KEVIN",
 }
