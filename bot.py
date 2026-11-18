@@ -315,7 +315,7 @@ def sync_deshacer(encargado, es_admin):
 
 def sync_hoy():
     hoy = ahora().strftime("%Y-%m-%d")
-    wa = get_sh().worksheet("Asistencias")
+    wa = sh.worksheet("Asistencias")
     return [a for a in asistencias_rows(wa) if a["fecha"][:10] == hoy]
 
 
@@ -407,7 +407,7 @@ AYUDA = (
     "SOCIOS\n"
     "/nuevo – alta de socio interactiva (con foto y plan)\n"
     "/socio <ID o Nombre> – ficha del socio o búsqueda flexible\n"
-    "/estats – resumen general rápido del gimnasio\n\n"
+    "/estats – resumen general con nombres (activos, vencidos e inactivos)\n\n"
     "PAGOS\n"
     "/cobros – control de cobros del día con casillas\n"
     "/pendientes – reporte de pagos pendientes\n"
@@ -440,35 +440,57 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(AYUDA, reply_markup=teclado)
 
 
-# ---------------------------------------------------------------- Comando /estats o /resumen
+# ---------------------------------------------------------------- Comando /estats o /resumen (Con nombres detallados)
 @autorizado
 async def cmd_estats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra un resumen rápido de socios activos, al corriente y vencidos."""
+    """Muestra resumen rápido y la lista de nombres por estatus (Al corriente, Vencidos e Inactivos)."""
     ws = get_sh()
     socios = await asyncio.to_thread(socios_filas, ws.worksheet("Socios"))
     hoy = ahora().date()
     
-    activos = 0
-    al_corriente = 0
-    vencidos = 0
+    al_corriente = []
+    vencidos_pendientes = []
+    inactivos = []
     
     for s in socios:
         if s["estado"] != "Activo":
+            inactivos.append(s["nombre"])
             continue
-        activos += 1
+            
         d = parse_fecha(s["proximo"])
         if d is not None and d >= hoy and s["pago"] != "Pendiente":
-            al_corriente += 1
+            al_corriente.append(s["nombre"])
         else:
-            vencidos += 1
+            vencidos_pendientes.append(s["nombre"])
             
-    texto = (
-        f"📊 **RESUMEN GENERAL DEL GIMNASIO**\n\n"
-        f"👥 **Socios Activos:** {activos}\n"
-        f"✅ **Al corriente:** {al_corriente}\n"
-        f"⚠️ **Vencidos / Pendientes:** {vencidos}"
-    )
-    await update.message.reply_text(texto, parse_mode="Markdown")
+    total_activos = len(al_corriente) + len(vencidos_pendientes)
+    
+    lineas = [
+        "📊 **RESUMEN GENERAL DEL GIMNASIO**\n",
+        f"👥 **Socios Activos Totales:** {total_activos}",
+        f"💤 **Inactivos:** {len(inactivos)}\n",
+        f"✅ **Al corriente ({len(al_corriente)}):**"
+    ]
+    
+    if al_corriente:
+        for nombre in al_corriente:
+            lineas.append(f"  • {nombre}")
+    else:
+        lineas.append("  *(Ninguno)*")
+        
+    lineas.append(f"\n⚠️ **Vencidos / Pendientes ({len(vencidos_pendientes)}):**")
+    if vencidos_pendientes:
+        for nombre in vencidos_pendientes:
+            lineas.append(f"  • {nombre}")
+    else:
+        lineas.append("  *(Ninguno)*")
+        
+    if inactivos:
+        lineas.append(f"\n🚫 **Inactivos ({len(inactivos)}):**")
+        for nombre in inactivos:
+            lineas.append(f"  • {nombre}")
+            
+    await update.message.reply_text("\n".join(lineas), parse_mode="Markdown")
 
 
 # ---------------------------------------------------------------- Reporte de pendientes
@@ -1032,146 +1054,4 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         hoy_str = ahora().strftime("%d/%m/%Y")
         try:
-            await q.edit_message_text(
-                text=f"📅 **Fecha de hoy: {hoy_str}**\n📋 Toca los socios que llegaron y presiona Guardar:",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="Markdown"
-            )
-        except Exception:
-            pass
-        await q.answer()
-        return
-
-    # Guardar las asistencias múltiples seleccionadas de golpe
-    if q.data == "asis_save":
-        key = (q.message.chat.id, q.message.message_id)
-        selected = ASISTENCIA_SELECCIONES.get(key, set())
-        
-        if not selected:
-            await q.answer("⚠️ No has seleccionado ningún socio.", show_alert=True)
-            return
-            
-        enc = quien(update) or "Admin"
-        sh = get_sh()
-        ws_socios = sh.worksheet("Socios")
-        wa = sh.worksheet("Asistencias")
-        
-        todos_socios = await asyncio.to_thread(socios_filas, ws_socios)
-        rows_asist = await asyncio.to_thread(asistencias_rows, wa)
-        hoy_str = ahora().strftime("%Y-%m-%d")
-        
-        asistidos_hoy = {a["id"] for a in rows_asist if a["fecha"][:10] == hoy_str}
-        
-        nuevas_filas = []
-        registrados = []
-        duplicados = []
-        
-        proxima_fila = rows_asist[-1]["fila"] + 1 if rows_asist else FILA_INICIO
-        
-        for socio_id in selected:
-            socio = next((s for s in todos_socios if s["id"] == socio_id), None)
-            if not socio:
-                continue
-                
-            if socio_id in asistidos_hoy:
-                duplicados.append(socio["nombre"])
-                continue
-                
-            estatus = estatus_de(socio["proximo"])
-            nuevas_filas.append([
-                ahora().strftime("%Y-%m-%d %H:%M:%S"),
-                int(socio["id"]),
-                f'=IFERROR(VLOOKUP(C{proxima_fila},Socios!B$6:C$500,2,FALSE),"")',
-                enc,
-                estatus,
-            ])
-            registrados.append(socio["nombre"])
-            proxima_fila += 1
-            
-        if nuevas_filas:
-            fin_fila = proxima_fila - 1
-            inicio_fila = fin_fila - len(nuevas_filas) + 1
-            def escribir_lote():
-                wa.update(
-                    range_name=f"B{inicio_fila}:F{fin_fila}",
-                    values=nuevas_filas,
-                    value_input_option="USER_ENTERED",
-                )
-                sync_semana(sh)
-            await asyncio.to_thread(escribir_lote)
-            
-        ASISTENCIA_SELECCIONES.pop(key, None)
-        
-        texto_fin = f"✅ **¡Asistencias guardadas con éxito!**\n"
-        if registrados:
-            texto_fin += f"• Registrados: {', '.join(registrados)}\n"
-        if duplicados:
-            texto_fin += f"• Ya tenían asistencia hoy: {', '.join(duplicados)}"
-            
-        try:
-            await q.edit_message_text(text=texto_fin, parse_mode="Markdown")
-        except Exception:
-            await q.message.reply_text(texto_fin, parse_mode="Markdown")
-        await q.answer("¡Guardado correctamente!")
-        return
-
-
-async def on_error(update, context):
-    log.error("Error no controlado", exc_info=context.error)
-
-
-async def post_init(app):
-    await app.bot.set_my_commands([
-        BotCommand("asistencia", "Registrar asistencia (lista con casillas)"),
-        BotCommand("hoy", "Quién ha llegado hoy"),
-        BotCommand("cobros", "Control de cobros del día con casillas"),
-        BotCommand("pendientes", "Reporte de pagos pendientes"),
-        BotCommand("estats", "Resumen general rápido del gimnasio"),
-        BotCommand("pago", "Cobrar directo: /pago ID visita|semana|mes"),
-        BotCommand("nuevo", "Alta de socio interactiva"),
-        BotCommand("socio", "Ficha de socio o búsqueda flexible"),
-        BotCommand("ayudante", "Registrar nuevo ayudante (admin)"),
-        BotCommand("vencidos", "Socios por cobrar"),
-        BotCommand("deshacer", "Borrar última asistencia"),
-        BotCommand("corte", "Corte de caja (admin)"),
-        BotCommand("start", "Menú de ayuda"),
-    ])
-
-
-def main():
-    app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
-    
-    # Manejador de conversación para /nuevo (Paso a paso)
-    conv_nuevo = ConversationHandler(
-        entry_points=[CommandHandler("nuevo", nuevo_inicio)],
-        states={
-            NOMBRE: [MessageHandler(filters.TEXT & ~filters.COMMAND, nuevo_nombre)],
-            TELEFONO: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_telefono)],
-            FOTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_foto)],
-            PLAN: [CallbackQueryHandler(recibir_plan_callback, pattern="^plan_")],
-        },
-        fallbacks=[CommandHandler("cancelar", cancelar_registro)],
-    )
-    app.add_handler(conv_nuevo)
-
-    for nombre, f in [
-        ("id", cmd_id), ("start", cmd_start),
-        ("pago", cmd_pago), ("asistencia", cmd_asistencia),
-        ("cobros", cmd_cobros), ("pendientes", cmd_pendientes),
-        ("estats", cmd_estats), ("resumen", cmd_estats),
-        ("ayudante", cmd_ayudante), ("deshacer", cmd_deshacer),
-        ("hoy", cmd_hoy), ("socio", cmd_socio), ("buscar", cmd_socio),
-        ("vencidos", cmd_vencidos), ("baja", cmd_baja), ("alta", cmd_alta),
-        ("corte", cmd_corte),
-    ]:
-        app.add_handler(CommandHandler(nombre, f))
-        
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_error_handler(on_error)
-    log.info("Bot de Power Gym iniciado")
-    app.run_polling(drop_pending_updates=True)
-
-
-if __name__ == "__main__":
-    threading.Thread(target=run_flask, daemon=True).start()
-    main()
+            await q
