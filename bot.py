@@ -104,7 +104,7 @@ def socios_filas(ws):
     """Lee todos los socios de forma segura soportando cualquier formato de ID."""
     out = []
     try:
-        rows = ws.get(f"B{FILA_INICIO}:O1500")
+        rows = ws.get(f"B{FILA_INICIO}:O1000")
     except Exception:
         rows = []
         
@@ -328,35 +328,41 @@ def sync_vencidos():
         if s["estado"] != "Activo":
             continue
             
-        d_inicio = parse_fecha(s["inicio"])
-        plan_lower = s["plan"].lower()
-        
-        # Calculamos la fecha real de vencimiento basándonos estrictamente en la fecha de inicio y el plan
-        fecha_vencimiento = None
-        if d_inicio:
-            if "semana" in plan_lower:
-                fecha_vencimiento = d_inicio + timedelta(days=7)
-            elif "mes" in plan_lower:
-                # Sumar aproximadamente 30 días o un mes de forma nativa
-                try:
-                    fecha_vencimiento = d_inicio.replace(month=d_inicio.month + 1 if d_inicio.month < 12 else 1, 
-                                                         year=d_inicio.year if d_inicio.month < 12 else d_inicio.year + 1)
-                except ValueError:
-                    fecha_vencimiento = d_inicio + timedelta(days=30)
-            elif "visita" in plan_lower:
-                fecha_vencimiento = d_inicio
+        # Revisamos estrictamente si en la columna J (pago) dice "Pendiente"
+        if s["pago"].lower() == "pendiente":
+            # Tomamos la fecha de la columna H (proximo)
+            d_proximo = parse_fecha(s["proximo"])
+            
+            if d_proximo:
+                dias_tarde = (hoy - d_proximo).days
+                s["fecha_vencimiento_real"] = d_proximo
+                s["dias"] = max(0, dias_tarde)
+                out.append(s)
             else:
-                fecha_vencimiento = d_inicio + timedelta(days=7)
-        
-        # Si está pendiente o su fecha calculada ya pasó o es hoy, entra en vencidos
-        if s["pago"] == "Pendiente" or (fecha_vencimiento and fecha_vencimiento <= hoy):
-            f_ref = fecha_vencimiento if fecha_vencimiento else parse_fecha(s["proximo"]) or hoy
-            dias_tarde = (hoy - f_ref).days
-            
-            s["fecha_vencimiento_real"] = f_ref
-            s["dias"] = max(0, dias_tarde)
-            out.append(s)
-            
+                # Si no hay fecha legible en H, usamos la fecha de inicio como referencia
+                d_inicio = parse_fecha(s["inicio"])
+                if d_inicio:
+                    plan_lower = s["plan"].lower()
+                    if "semana" in plan_lower:
+                        f_venc = d_inicio + timedelta(days=7)
+                    elif "mes" in plan_lower:
+                        try:
+                            f_venc = d_inicio.replace(month=d_inicio.month + 1 if d_inicio.month < 12 else 1, 
+                                                     year=d_inicio.year if d_inicio.month < 12 else d_inicio.year + 1)
+                        except ValueError:
+                            f_venc = d_inicio + timedelta(days=30)
+                    else:
+                        f_venc = d_inicio
+                    
+                    dias_tarde = (hoy - f_venc).days
+                    s["fecha_vencimiento_real"] = f_venc
+                    s["dias"] = max(0, dias_tarde)
+                    out.append(s)
+                else:
+                    s["fecha_vencimiento_real"] = hoy
+                    s["dias"] = 0
+                    out.append(s)
+                    
     return out
 
 
@@ -900,7 +906,7 @@ async def cmd_vencidos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif dias == 0:
             cuando = f"vence HOY ({f_venc_str})"
         else:
-            cuando = f"pendiente (vencía el {f_venc_str})"
+            cuando = f"vence el {f_venc_str}"
             
         extra = f" · Plan: {s['plan']}"
         lineas.append(f"• ID {s['id']} · **{s['nombre']}** — {cuando}{extra} | Tel: {s['tel'] or 's/n'}")
