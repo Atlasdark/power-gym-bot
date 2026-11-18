@@ -124,11 +124,22 @@ def socios_filas(ws):
     return out
 
 
-def buscar_socio(ws, socio_id):
-    for s in socios_filas(ws):
-        if s["id"] == str(socio_id):
-            return s
-    return None
+def buscar_socio_flexible(ws, query):
+    """Busca un socio por ID exacto, o por coincidencia parcial en nombre o teléfono."""
+    socios = socios_filas(ws)
+    q = str(query).lower().strip()
+    
+    # 1. Buscar por ID exacto
+    for s in socios:
+        if s["id"] == q:
+            return [s]
+            
+    # 2. Buscar por nombre o teléfono
+    coincidencias = []
+    for s in socios:
+        if q in s["nombre"].lower() or q in s["tel"].lower():
+            coincidencias.append(s)
+    return coincidencias
 
 
 def asistencias_rows(wa):
@@ -212,7 +223,8 @@ def sync_nuevo(nombre, telefono, foto_url, plan_key, encargado):
 def sync_pago(socio_id, plan_key, encargado):
     sh = get_sh()
     ws = sh.worksheet("Socios")
-    s = buscar_socio(ws, socio_id)
+    socios = socios_filas(ws)
+    s = next((x for x in socios if x["id"] == str(socio_id)), None)
     if not s:
         return None
     fila = s["fila"]
@@ -256,7 +268,8 @@ def sync_semana(sh):
 
 
 def procesar_registro_asistencia(sh, socio_id, encargado):
-    s = buscar_socio(sh.worksheet("Socios"), socio_id)
+    socios = socios_filas(sh.worksheet("Socios"))
+    s = next((x for x in socios if x["id"] == str(socio_id)), None)
     if not s:
         return None
     wa = sh.worksheet("Asistencias")
@@ -306,17 +319,6 @@ def sync_hoy():
     return [a for a in asistencias_rows(wa) if a["fecha"][:10] == hoy]
 
 
-def sync_buscar(texto):
-    t = texto.lower().strip()
-    ws = get_sh().worksheet("Socios")
-    return [s for s in socios_filas(ws)
-            if t in s["nombre"].lower() or t in s["tel"]][:10]
-
-
-def sync_socio(socio_id):
-    return buscar_socio(get_sh().worksheet("Socios"), socio_id)
-
-
 def sync_vencidos():
     ws = get_sh().worksheet("Socios")
     hoy = ahora().date()
@@ -326,14 +328,16 @@ def sync_vencidos():
             continue
         d = parse_fecha(s["proximo"])
         if d is None or d < hoy or s["pago"] == "Pendiente":
-            s["dias"] = (hoy - d).days if (d and d < hoy) else 0
+            dias_tarde = (hoy - d).days if (d and d < hoy) else 0
+            s["dias"] = dias_tarde
             out.append(s)
     return out
 
 
 def sync_set(socio_id, columna, valor):
     ws = get_sh().worksheet("Socios")
-    s = buscar_socio(ws, socio_id)
+    socios = socios_filas(ws)
+    s = next((x for x in socios if x["id"] == str(socio_id)), None)
     if not s:
         return None
     ws.update(range_name=f"{columna}{s['fila']}", values=[[valor]],
@@ -402,9 +406,8 @@ AYUDA = (
     "🏋️ Power Gym – comandos\n\n"
     "SOCIOS\n"
     "/nuevo – alta de socio interactiva (con foto y plan)\n"
-    "/buscar texto – busca por nombre o teléfono\n"
-    "/socio 3 – ficha del socio\n"
-    "/telefono 3 8112345678 – cambia el teléfono\n\n"
+    "/socio <ID o Nombre> – ficha del socio o búsqueda flexible\n"
+    "/estats – resumen general rápido del gimnasio\n\n"
     "PAGOS\n"
     "/cobros – control de cobros del día con casillas\n"
     "/pendientes – reporte de pagos pendientes\n"
@@ -437,7 +440,38 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(AYUDA, reply_markup=teclado)
 
 
-# ---------------------------------------------------------------- Reporte clásico de pendientes
+# ---------------------------------------------------------------- Comando /estats o /resumen
+@autorizado
+async def cmd_estats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra un resumen rápido de socios activos, al corriente y vencidos."""
+    ws = get_sh()
+    socios = await asyncio.to_thread(socios_filas, ws.worksheet("Socios"))
+    hoy = ahora().date()
+    
+    activos = 0
+    al_corriente = 0
+    vencidos = 0
+    
+    for s in socios:
+        if s["estado"] != "Activo":
+            continue
+        activos += 1
+        d = parse_fecha(s["proximo"])
+        if d is not None and d >= hoy and s["pago"] != "Pendiente":
+            al_corriente += 1
+        else:
+            vencidos += 1
+            
+    texto = (
+        f"📊 **RESUMEN GENERAL DEL GIMNASIO**\n\n"
+        f"👥 **Socios Activos:** {activos}\n"
+        f"✅ **Al corriente:** {al_corriente}\n"
+        f"⚠️ **Vencidos / Pendientes:** {vencidos}"
+    )
+    await update.message.reply_text(texto, parse_mode="Markdown")
+
+
+# ---------------------------------------------------------------- Reporte de pendientes
 @autorizado
 async def cmd_pendientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Muestra reporte detallado de pagos que vencen hoy y atrasados."""
@@ -462,7 +496,7 @@ async def cmd_pendientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if d == hoy:
             hoy_vencen.append(s)
         elif d < hoy or s["pago"] == "Pendiente":
-            dias_tarde = (hoy - d).days if d else 0
+            dias_tarde = (hoy - d).days if (d and d < hoy) else 0
             s["dias_tarde"] = dias_tarde
             atrasados.append(s)
             
@@ -764,38 +798,41 @@ async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lineas))
 
 
-@autorizado
-async def cmd_buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ Usa: /buscar juan   (nombre o teléfono)")
-        return
-    res = await asyncio.to_thread(sync_buscar, " ".join(context.args))
-    if not res:
-        await update.message.reply_text("No encontré socios con ese dato.")
-        return
-    await update.message.reply_text("\n".join(
-        f"ID {s['id']} · {s['nombre']} · {s['plan']} · vence {s['proximo'] or 's/f'}"
-        for s in res))
-
-
+# ---------------------------------------------------------------- Comando unificado /socio (Búsqueda por ID, nombre o teléfono)
 @autorizado
 async def cmd_socio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not pedir_id(context.args):
-        await update.message.reply_text("⚠️ Usa: /socio 3")
+    if not context.args:
+        await update.message.reply_text("⚠️ Usa: /socio 3   (o /socio Juan, o /socio 8112345678)")
         return
-    s = await asyncio.to_thread(sync_socio, context.args[0])
-    if not s:
-        await update.message.reply_text(f"❌ No existe el socio con ID {context.args[0]}.")
+    
+    query = " ".join(context.args)
+    ws = get_sh().worksheet("Socios")
+    res = await asyncio.to_thread(buscar_socio_flexible, ws, query)
+    
+    if not res:
+        await update.message.reply_text(f"❌ No encontré ningún socio con: '{query}'.")
         return
-    await update.message.reply_text(
-        f"👤 {s['nombre']} (ID {s['id']})\n"
-        f"Tel: {s['tel'] or 's/n'}\n"
-        f"Foto URL: {s['foto'] or 's/n'}\n"
-        f"Plan: {s['plan']} {s['monto']} · {s['pago']} · {s['estado']}\n"
-        f"Inicio: {s['inicio']} · Vence: {s['proximo'] or 's/f'} "
-        f"({estatus_de(s['proximo'])})\n"
-        f"Asistencias: {s['total'] or 0} · Última: {s['ultima'] or '—'}"
-    )
+        
+    # Si encuentra exactamente uno o es búsqueda por ID, muestra la ficha completa
+    if len(res) == 1:
+        s = res[0]
+        await update.message.reply_text(
+            f"👤 **{s['nombre']}** (ID {s['id']})\n"
+            f"Tel: {s['tel'] or 's/n'}\n"
+            f"Foto URL: {s['foto'] or 's/n'}\n"
+            f"Plan: {s['plan']} ${s['monto']} · {s['pago']} · {s['estado']}\n"
+            f"Inicio: {s['inicio']} · Vence: {s['proximo'] or 's/f'} "
+            f"({estatus_de(s['proximo'])})\n"
+            f"Asistencias: {s['total'] or 0} · Última: {s['ultima'] or '—'}",
+            parse_mode="Markdown"
+        )
+    else:
+        # Si hay varios con el mismo nombre o teléfono, lista las opciones
+        lineas = [f"🔍 Encontré {len(res)} socios con '{query}':"]
+        for s in res[:10]:
+            lineas.append(f"• ID {s['id']} · **{s['nombre']}** ({s['plan']}) - Vence: {s['proximo'] or 's/f'}")
+        lineas.append("\nUsa `/socio <ID>` para ver la ficha detallada.")
+        await update.message.reply_text("\n".join(lineas), parse_mode="Markdown")
 
 
 @autorizado
@@ -811,17 +848,6 @@ async def cmd_vencidos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         extra = " · pago PENDIENTE" if s["pago"] == "Pendiente" else ""
         lineas.append(f"ID {s['id']} · {s['nombre']} · {cuando}{extra} · {s['tel'] or 's/n'}")
     await update.message.reply_text("\n".join(lineas))
-
-
-@autorizado
-async def cmd_telefono(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    a = context.args
-    if len(a) != 2 or not a[0].isdigit() or not a[1].isdigit():
-        await update.message.reply_text("⚠️ Usa: /telefono 3 8112345678")
-        return
-    n = await asyncio.to_thread(sync_set, a[0], "D", a[1])
-    await update.message.reply_text(
-        f"📞 Teléfono de {n} actualizado." if n else f"❌ No existe el socio {a[0]}.")
 
 
 @solo_admin
@@ -1100,15 +1126,15 @@ async def post_init(app):
         BotCommand("hoy", "Quién ha llegado hoy"),
         BotCommand("cobros", "Control de cobros del día con casillas"),
         BotCommand("pendientes", "Reporte de pagos pendientes"),
+        BotCommand("estats", "Resumen general rápido del gimnasio"),
         BotCommand("pago", "Cobrar directo: /pago ID visita|semana|mes"),
         BotCommand("nuevo", "Alta de socio interactiva"),
+        BotCommand("socio", "Ficha de socio o búsqueda flexible"),
         BotCommand("ayudante", "Registrar nuevo ayudante (admin)"),
-        BotCommand("buscar", "Buscar socio por nombre o teléfono"),
-        BotCommand("socio", "Ficha de un socio"),
         BotCommand("vencidos", "Socios por cobrar"),
         BotCommand("deshacer", "Borrar última asistencia"),
         BotCommand("corte", "Corte de caja (admin)"),
-        BotCommand("start", "Ayuda"),
+        BotCommand("start", "Menú de ayuda"),
     ])
 
 
@@ -1129,12 +1155,14 @@ def main():
     app.add_handler(conv_nuevo)
 
     for nombre, f in [
-        ("id", cmd_id), ("start", cmd_start), ("ayuda", cmd_start),
+        ("id", cmd_id), ("start", cmd_start),
         ("pago", cmd_pago), ("asistencia", cmd_asistencia),
-        ("cobros", cmd_cobros), ("pendientes", cmd_pendientes), ("ayudante", cmd_ayudante),
-        ("deshacer", cmd_deshacer), ("hoy", cmd_hoy), ("buscar", cmd_buscar),
-        ("socio", cmd_socio), ("vencidos", cmd_vencidos), ("telefono", cmd_telefono),
-        ("baja", cmd_baja), ("alta", cmd_alta), ("corte", cmd_corte),
+        ("cobros", cmd_cobros), ("pendientes", cmd_pendientes),
+        ("estats", cmd_estats), ("resumen", cmd_estats),
+        ("ayudante", cmd_ayudante), ("deshacer", cmd_deshacer),
+        ("hoy", cmd_hoy), ("socio", cmd_socio), ("buscar", cmd_socio),
+        ("vencidos", cmd_vencidos), ("baja", cmd_baja), ("alta", cmd_alta),
+        ("corte", cmd_corte),
     ]:
         app.add_handler(CommandHandler(nombre, f))
         
