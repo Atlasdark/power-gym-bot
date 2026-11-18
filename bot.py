@@ -327,8 +327,9 @@ def sync_vencidos():
         if s["estado"] != "Activo":
             continue
         d = parse_fecha(s["proximo"])
-        if d is None or d < hoy or s["pago"] == "Pendiente":
-            dias_tarde = (hoy - d).days if (d and d < hoy) else 0
+        # Si el pago está pendiente, o la fecha ya pasó (o es hoy)
+        if s["pago"] == "Pendiente" or (d is not None and d <= hoy):
+            dias_tarde = (hoy - d).days if (d is not None and d < hoy) else 0
             s["dias"] = dias_tarde
             out.append(s)
     return out
@@ -865,10 +866,16 @@ async def cmd_vencidos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lineas = [f"⚠️ {len(res)} socios por cobrar:"]
     for s in res[:40]:
         dias = s.get("dias", 0)
-        cuando = f"venció hace {dias} día(s)" if dias > 0 else f"vence {s['proximo'] or 's/f'}"
-        extra = " · pago PENDIENTE" if s["pago"] == "Pendiente" else ""
-        lineas.append(f"ID {s['id']} · {s['nombre']} · {cuando}{extra} · {s['tel'] or 's/n'}")
-    await update.message.reply_text("\n".join(lineas))
+        if s["pago"] == "Pendiente":
+            cuando = "pago PENDIENTE"
+        elif dias > 0:
+            cuando = f"venció hace {dias} día(s)"
+        else:
+            cuando = "vence HOY"
+            
+        extra = f" · Plan: {s['plan']}"
+        lineas.append(f"ID {s['id']} · **{s['nombre']}** · {cuando}{extra} · {s['tel'] or 's/n'}")
+    await update.message.reply_text("\n".join(lineas), parse_mode="Markdown")
 
 
 @solo_admin
@@ -1154,7 +1161,7 @@ async def post_init(app):
         BotCommand("ayudante", "Registrar nuevo ayudante (admin)"),
         BotCommand("vencidos", "Socios por cobrar"),
         BotCommand("deshacer", "Borrar última asistencia"),
-        BotCommand("corte", "Corte de caja (admin)"),
+        BotCommand("corte", "Corte de caja (admin)`,"),
         BotCommand("start", "Menú de ayuda"),
     ])
 
