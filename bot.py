@@ -202,7 +202,7 @@ def _fila_socio_nueva(fila, nuevo_id, nombre, telefono, foto_url, plan_key, enca
         estado_pago, "Activo", encargado, n.strftime("%Y-%m-%d %H:%M:%S"),
         f'=IF(B{fila}="","",IFERROR(IF(COUNTIF(Asistencias!C$6:C$500,B{fila})>0,'
         f'MAXIFS(Asistencias!B$6:B$500,Asistencias!C$6:C$500,B{fila}),"—"),"—"))',
-        f'=IF(B{fila}="","",COUNTIF(Asistencias!C$6:C$500,B{fila}))',
+        f'=IF(B$6="","",COUNTIF(Asistencias!C$6:C$500,B{fila}))',
     ]
 
 
@@ -322,15 +322,19 @@ def sync_hoy():
 def sync_vencidos():
     ws = get_sh().worksheet("Socios")
     hoy = ahora().date()
+    hace_un_mes = hoy - timedelta(days=30)
     out = []
     for s in socios_filas(ws):
         if s["estado"] != "Activo":
             continue
         d = parse_fecha(s["proximo"])
-        # Si el pago está pendiente, o la fecha ya pasó (o es hoy)
-        if s["pago"] == "Pendiente" or (d is not None and d <= hoy):
-            dias_tarde = (hoy - d).days if (d is not None and d < hoy) else 0
+        # Incluimos si está pendiente o si su fecha venció en los últimos 30 días (o antes)
+        if s["pago"] == "Pendiente" or (d is not None and d <= hoy and d >= hace_un_mes):
+            dias_tarde = (hoy - d).days if (d is not None and d < hoy) else (0 if d == hoy else 0)
             s["dias"] = dias_tarde
+            out.append(s)
+        elif s["pago"] == "Pendiente":
+            s["dias"] = 0
             out.append(s)
     return out
 
@@ -863,18 +867,21 @@ async def cmd_vencidos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not res:
         await update.message.reply_text("🎉 No hay socios vencidos ni pendientes.")
         return
-    lineas = [f"⚠️ {len(res)} socios por cobrar:"]
+    lineas = [f"⚠️ **{len(res)} socios por cobrar:**\n"]
     for s in res[:40]:
         dias = s.get("dias", 0)
+        proximo_str = s["proximo"] or "s/f"
+        
         if s["pago"] == "Pendiente":
-            cuando = "pago PENDIENTE"
+            cuando = f"pendiente desde {proximo_str}"
         elif dias > 0:
-            cuando = f"venció hace {dias} día(s)"
+            cuando = f"venció el {proximo_str} (hace {dias} día(s))"
         else:
-            cuando = "vence HOY"
+            cuando = f"vence HOY ({proximo_str})"
             
         extra = f" · Plan: {s['plan']}"
-        lineas.append(f"ID {s['id']} · **{s['nombre']}** · {cuando}{extra} · {s['tel'] or 's/n'}")
+        lineas.append(f"• ID {s['id']} · **{s['nombre']}** — {cuando}{extra} | Tel: {s['tel'] or 's/n'}")
+        
     await update.message.reply_text("\n".join(lineas), parse_mode="Markdown")
 
 
@@ -1161,7 +1168,7 @@ async def post_init(app):
         BotCommand("ayudante", "Registrar nuevo ayudante (admin)"),
         BotCommand("vencidos", "Socios por cobrar"),
         BotCommand("deshacer", "Borrar última asistencia"),
-        BotCommand("corte", "Corte de caja (admin)`,"),
+        BotCommand("corte", "Corte de caja (admin)"),
         BotCommand("start", "Menú de ayuda"),
     ])
 
