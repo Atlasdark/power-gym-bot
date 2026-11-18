@@ -406,7 +406,8 @@ AYUDA = (
     "/socio 3 – ficha del socio\n"
     "/telefono 3 8112345678 – cambia el teléfono\n\n"
     "PAGOS\n"
-    "/cobros – lista interactiva para palomear cobros del día y atrasados\n"
+    "/cobros – control de cobros del día con casillas\n"
+    "/pendientes – reporte de pagos pendientes\n"
     "/pago 3 mes – cobra directo: visita, semana o mes\n"
     "/vencidos – lista rápida de vencidos\n\n"
     "ASISTENCIA\n"
@@ -434,6 +435,57 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [[InlineKeyboardButton("📊 Corte de hoy", callback_data="ver_corte")]]
         )
     await update.message.reply_text(AYUDA, reply_markup=teclado)
+
+
+# ---------------------------------------------------------------- Reporte clásico de pendientes
+@autorizado
+async def cmd_pendientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra reporte detallado de pagos que vencen hoy y atrasados."""
+    ws = get_sh()
+    socios = await asyncio.to_thread(socios_filas, ws.worksheet("Socios"))
+    hoy = ahora().date()
+    
+    hoy_vencen = []
+    atrasados = []
+    
+    for s in socios:
+        if s["estado"] != "Activo":
+            continue
+        d = parse_fecha(s["proximo"])
+        if d is None:
+            continue
+            
+        plan = s["plan"]
+        monto_txt = "$50" if plan == "Visita" else ("$150" if plan == "Semana" else ("$400" if plan == "Mes" else "Por definir"))
+        s["monto_txt"] = monto_txt
+        
+        if d == hoy:
+            hoy_vencen.append(s)
+        elif d < hoy or s["pago"] == "Pendiente":
+            dias_tarde = (hoy - d).days if d else 0
+            s["dias_tarde"] = dias_tarde
+            atrasados.append(s)
+            
+    lineas = ["📊 **REPORTE DE PAGOS Y VENCIMIENTOS**\n"]
+    
+    lineas.append(f"📅 **Vencen hoy ({len(hoy_vencen)}):**")
+    if hoy_vencen:
+        for s in hoy_vencen:
+            lineas.append(f"  • ID {s['id']} · **{s['nombre']}** | Plan: {s['plan']} ({s['monto_txt']}) | Tel: {s['tel'] or 's/tel'}")
+    else:
+        lineas.append("  *Ninguno para hoy.*")
+        
+    lineas.append("")
+    lineas.append(f"⚠️ **Atrasados / Pendientes de días anteriores ({len(atrasados)}):**")
+    if atrasados:
+        for s in atrasados:
+            dias = s.get("dias_tarde", 0)
+            detalle = f"venció hace {dias} día(s)" if dias > 0 else "Pago pendiente"
+            lineas.append(f"  • ID {s['id']} · **{s['nombre']}** — {detalle} | Plan: {s['plan']} ({s['monto_txt']})")
+    else:
+        lineas.append("  *¡Todo al corriente! No hay atrasados.*")
+        
+    await update.message.reply_text("\n".join(lineas), parse_mode="Markdown")
 
 
 # ---------------------------------------------------------------- Control de Cobros Interactivo (/cobros)
