@@ -418,8 +418,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------- ConversationHandler para /nuevo
-@autorizado
 async def nuevo_inicio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid not in ENCARGADOS and uid != ADMIN_ID:
+        await update.message.reply_text(f"⛔ No tienes permiso. Tu ID es {uid}.")
+        return ConversationHandler.END
     await update.message.reply_text(
         "🏋️ **Registro de Nuevo Socio** (Paso 1/4)\n\n"
         "Escribe el **Nombre completo** del socio:"
@@ -434,11 +437,6 @@ async def nuevo_nombre(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Escribe el número de **Teléfono** (o escribe 'ninguno'):"
     )
     return TELEFONO
-
-
-async def nuevo_telefono(update: ContextTypes.DEFAULT_TYPE, update_obj: Update = None):
-    # Soporte compatible para el mensaje
-    pass
 
 
 async def recibir_telefono(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -745,7 +743,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = []
         for s in socios_activos:
-            icono = "✅" if s["id"] in selected else "⭕"
+            icono = "✅" if s['id'] in selected else "⭕"
             keyboard.append([InlineKeyboardButton(f"{icono} {s['nombre']} (ID {s['id']})", callback_data=f"asis_tog_{s['id']}")])
         
         keyboard.append([InlineKeyboardButton("💾 Guardar asistencias seleccionadas", callback_data="asis_save")])
