@@ -406,8 +406,8 @@ AYUDA = (
     "/telefono 3 8112345678 – cambia el teléfono\n\n"
     "PAGOS\n"
     "/pago 3 mes – cobra (visita, semana o mes)\n"
-    "/vencidos – vencidos y pendientes de pago\n"
-    "/pendientes – reporte de pagos de hoy y atrasados\n\n"
+    "/pendientes – lista interactiva de cobros pendientes y vencidos\n"
+    "/vencidos – lista rápida de vencidos\n\n"
     "ASISTENCIA\n"
     "/asistencia – lista con casillas y fecha actual\n"
     "/asistencia 3 – registra asistencia directa por ID\n"
@@ -435,55 +435,65 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(AYUDA, reply_markup=teclado)
 
 
-# ---------------------------------------------------------------- Reporte de pendientes
+# ---------------------------------------------------------------- Reporte interactivo de pendientes
 @autorizado
 async def cmd_pendientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra reporte detallado de pagos que vencen hoy y atrasados con plan y monto."""
+    """Muestra reporte interactivo de pagos que vencen hoy y atrasados con botones de cobro."""
     ws = get_sh()
     socios = await asyncio.to_thread(socios_filas, ws.worksheet("Socios"))
     hoy = ahora().date()
     
-    hoy_vencen = []
-    atrasados = []
-    
+    por_cobrar = []
     for s in socios:
         if s["estado"] != "Activo":
             continue
         d = parse_fecha(s["proximo"])
-        if d is None:
-            continue
-            
+        
         plan = s["plan"]
         monto_txt = "$50" if plan == "Visita" else ("$150" if plan == "Semana" else ("$400" if plan == "Mes" else "Por definir"))
         s["monto_txt"] = monto_txt
         
-        if d == hoy:
-            hoy_vencen.append(s)
-        elif d < hoy or s["pago"] == "Pendiente":
-            dias_tarde = (hoy - d).days if d else 0
+        # Si vence hoy, ya venció o tiene pago pendiente
+        if (d is not None and d <= hoy) or s["pago"] == "Pendiente":
+            dias_tarde = (hoy - d).days if (d is not None and d < hoy) else 0
             s["dias_tarde"] = dias_tarde
-            atrasados.append(s)
-            
-    lineas = ["📊 **REPORTE DE PAGOS Y VENCIMIENTOS**\n"]
+            s["vence_hoy"] = (d == hoy)
+            por_cobrar.append(s)
+
+    if not por_cobrar:
+        await update.message.reply_text("🎉 ¡Excelente! No hay socios pendientes de pago ni vencidos hoy.")
+        return
+
+    lineas = ["📊 **PAGOS PENDIENTES Y VENCIDOS**\n"]
+    keyboard = []
     
-    lineas.append(f"📅 **Vencen hoy ({len(hoy_vencen)}):**")
-    if hoy_vencen:
-        for s in hoy_vencen:
-            lineas.append(f"  • ID {s['id']} · **{s['nombre']}** | Plan: {s['plan']} ({s['monto_txt']}) | Tel: {s['tel'] or 's/tel'}")
-    else:
-        lineas.append("  *Ninguno para hoy.*")
+    for s in por_cobrar[:30]:
+        if s["vence_hoy"]:
+            estado_str = "📅 Vence HOY"
+        elif s["dias_tarde"] > 0:
+            estado_str = f"⚠️ Venció hace {s['dias_tarde']}d"
+        else:
+            estado_str = "💳 Pago pendiente"
+            
+        lineas.append(f"• ID {s['id']} · **{s['nombre']}** | {s['plan']} ({s['monto_txt']}) — {estado_str}")
         
-    lineas.append("")
-    lineas.append(f"⚠️ **Atrasados / Pendientes de días anteriores ({len(atrasados)}):**")
-    if atrasados:
-        for s in atrasados:
-            dias = s.get("dias_tarde", 0)
-            detalle = f"venció hace {dias} día(s)" if dias > 0 else "Pago pendiente"
-            lineas.append(f"  • ID {s['id']} · **{s['nombre']}** — {detalle} | Plan: {s['plan']} ({s['monto_txt']})")
-    else:
-        lineas.append("  *¡Todo al corriente! No hay atrasados.*")
+        plan_lower = s["plan"].lower()
+        plan_key = "visita" if "visita" in plan_lower else ("semana" if "semana" in plan_lower else "mes")
+        plan_label = s["plan"] if s["plan"] in ["Visita", "Semana", "Mes"] else "Mes"
         
-    await update.message.reply_text("\n".join(lineas), parse_mode="Markdown")
+        keyboard.append([
+            InlineKeyboardButton(
+                f"💰 Cobrar {plan_label} ({s['monto_txt']}) a {s['nombre']}",
+                callback_data=f"cobrar_rapido_{s['id']}_{plan_key}"
+            )
+        ])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "\n".join(lineas) + "\n\n👇 **Toca el botón del socio para registrar su pago:**",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
 
 
 # ---------------------------------------------------------------- Agregar ayudante (Admin)
@@ -814,6 +824,35 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(await _texto_corte("hoy"))
         return
 
+    # Cobro rápido desde el menú interactivo de /pendientes
+    if q.data.startswith("cobrar_rapido_"):
+        partes = q.data.replace("cobrar_rapido_", "").split("_")
+        socio_id = partes[0]
+        plan_key = partes[1]
+        
+        encargado = quien(update) or "Admin"
+        r = await asyncio.to_thread(sync_pago, socio_id, plan_key, encargado)
+        
+        if r is None:
+            await q.answer("❌ No se encontró el socio.", show_alert=True)
+            return
+            
+        nombre, plan, monto, proximo = r
+        await q.answer(f"¡Cobro exitoso a {nombre}!", show_alert=True)
+        
+        try:
+            await q.edit_message_text(
+                text=f"✅ **¡Pago registrado con éxito!**\n\n"
+                     f"💰 **Socio:** {nombre}\n"
+                     f"📋 **Plan:** {plan} (${monto})\n"
+                     f"📅 **Próximo pago:** {proximo}\n"
+                     f"👤 **Cobrado por:** {encargado}",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+        return
+
     if q.data.startswith("asis_tog_"):
         socio_id = q.data.replace("asis_tog_", "")
         key = (q.message.chat.id, q.message.message_id)
@@ -851,7 +890,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         return
 
-    # Guardar las asistencias múltiples seleccionadas de golpe (Evita error 429)
+    # Guardar las asistencias múltiples seleccionadas de golpe
     if q.data == "asis_save":
         key = (q.message.chat.id, q.message.message_id)
         selected = ASISTENCIA_SELECCIONES.get(key, set())
@@ -933,9 +972,9 @@ async def post_init(app):
     await app.bot.set_my_commands([
         BotCommand("asistencia", "Registrar asistencia (lista con casillas)"),
         BotCommand("hoy", "Quién ha llegado hoy"),
+        BotCommand("pendientes", "Cobros pendientes y vencidos (botones)"),
         BotCommand("pago", "Cobrar: /pago ID visita|semana|mes"),
         BotCommand("nuevo", "Alta de socio interactiva"),
-        BotCommand("pendientes", "Reporte de pagos de hoy y atrasados"),
         BotCommand("ayudante", "Registrar nuevo ayudante (admin)"),
         BotCommand("buscar", "Buscar socio por nombre o teléfono"),
         BotCommand("socio", "Ficha de un socio"),
