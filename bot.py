@@ -202,7 +202,7 @@ def _fila_socio_nueva(fila, nuevo_id, nombre, telefono, foto_url, plan_key, enca
         estado_pago, "Activo", encargado, n.strftime("%Y-%m-%d %H:%M:%S"),
         f'=IF(B{fila}="","",IFERROR(IF(COUNTIF(Asistencias!C$6:C$500,B{fila})>0,'
         f'MAXIFS(Asistencias!B$6:B$500,Asistencias!C$6:C$500,B{fila}),"—"),"—"))',
-        f'=IF(B$6="","",COUNTIF(Asistencias!C$6:C$500,B{fila}))',
+        f'=IF(B{fila}="","",COUNTIF(Asistencias!C$6:C$500,B{fila}))',
     ]
 
 
@@ -328,13 +328,16 @@ def sync_vencidos():
         if s["estado"] != "Activo":
             continue
         d = parse_fecha(s["proximo"])
-        # Incluimos si está pendiente o si su fecha venció en los últimos 30 días (o antes)
+        
+        # Un socio está vencido si:
+        # 1. Su estatus de pago es "Pendiente"
+        # 2. O su fecha de próximo pago (d) ya pasó o es hoy (d <= hoy), ignorando fechas futuras.
         if s["pago"] == "Pendiente" or (d is not None and d <= hoy and d >= hace_un_mes):
-            dias_tarde = (hoy - d).days if (d is not None and d < hoy) else (0 if d == hoy else 0)
+            if d and d <= hoy:
+                dias_tarde = (hoy - d).days
+            else:
+                dias_tarde = 0
             s["dias"] = dias_tarde
-            out.append(s)
-        elif s["pago"] == "Pendiente":
-            s["dias"] = 0
             out.append(s)
     return out
 
@@ -522,7 +525,7 @@ async def cmd_pendientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if d == hoy:
             hoy_vencen.append(s)
-        elif d < hoy or s["pago"] == "Pendiente":
+        elif (d < hoy and d >= hoy - timedelta(days=30)) or s["pago"] == "Pendiente":
             dias_tarde = (hoy - d).days if (d and d < hoy) else 0
             s["dias_tarde"] = dias_tarde
             atrasados.append(s)
@@ -868,16 +871,21 @@ async def cmd_vencidos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🎉 No hay socios vencidos ni pendientes.")
         return
     lineas = [f"⚠️ **{len(res)} socios por cobrar:**\n"]
+    hoy = ahora().date()
+    
     for s in res[:40]:
-        dias = s.get("dias", 0)
-        proximo_str = s["proximo"] or "s/f"
+        d = parse_fecha(s["proximo"])
         
-        if s["pago"] == "Pendiente":
-            cuando = f"pendiente desde {proximo_str}"
-        elif dias > 0:
-            cuando = f"venció el {proximo_str} (hace {dias} día(s))"
+        # Si la fecha es futura o nula pero está pendiente, indicamos que está pendiente de pago sin mostrar fecha futura
+        if s["pago"] == "Pendiente" and (d is None or d > hoy):
+            cuando = "pago pendiente (sin fecha al corriente)"
+        elif d and d < hoy:
+            dias = (hoy - d).days
+            cuando = f"venció el {s['proximo']} (hace {dias} día(s))"
+        elif d == hoy:
+            cuando = f"vence HOY ({s['proximo']})"
         else:
-            cuando = f"vence HOY ({proximo_str})"
+            cuando = "pago pendiente"
             
         extra = f" · Plan: {s['plan']}"
         lineas.append(f"• ID {s['id']} · **{s['nombre']}** — {cuando}{extra} | Tel: {s['tel'] or 's/n'}")
