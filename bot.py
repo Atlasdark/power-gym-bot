@@ -677,7 +677,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("⚠️ No has seleccionado ningún socio.", show_alert=True)
             return
             
-        enc = quien(q.from_user)
+        # Corrección: Obtener el nombre del encargado de forma segura para los botones
+        enc = ENCARGADOS.get(q.from_user.id, "Admin")
         sh = get_sh()
         registrados = []
         duplicados = []
