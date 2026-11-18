@@ -13,6 +13,7 @@ from google.oauth2.service_account import Credentials
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler,
+    ConversationHandler, MessageHandler, filters,
 )
 
 logging.basicConfig(
@@ -52,6 +53,9 @@ COL_ID, COL_NOMBRE = 2, 3
 DIAS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
 
 ASISTENCIA_SELECCIONES = {}
+
+# Estados para la conversación de registro (/nuevo)
+NOMBRE, TELEFONO, FOTO, PLAN = range(4)
 
 # ---------------------------------------------------------------- Utilidades
 _sh = None
@@ -115,8 +119,9 @@ def socios_filas(ws):
             continue
         out.append({
             "fila": i, "id": socio_id, "nombre": nombre, "tel": str(r[2]).strip(),
-            "plan": str(r[4]).strip(), "monto": r[5], "inicio": r[6], "proximo": r[7],
-            "pago": str(r[8]).strip(), "estado": str(r[9]).strip(), "encargado": r[10],
+            "foto": str(r[3]).strip(), "plan": str(r[4]).strip(), "monto": r[5],
+            "inicio": r[6], "proximo": r[7], "pago": str(r[8]).strip(),
+            "estado": str(r[9]).strip(), "encargado": r[10],
             "ultima": r[12], "total": r[13],
         })
     return out
@@ -155,22 +160,25 @@ def get_pagos_ws(sh):
 
 
 # ---------------------------------------------------------------- Operaciones en la hoja
-def _fila_socio_nueva(fila, nuevo_id, nombre, telefono, encargado):
+def _fila_socio_nueva(fila, nuevo_id, nombre, telefono, foto_url, plan_key, encargado):
     n = ahora()
+    plan_nombre, _ = PLANES.get(plan_key, ("Visita", 50)) if plan_key in PLANES else ("Visita", 50)
+    estado_pago = "Pagado" if plan_key in PLANES else "Pendiente"
+    
     return [
-        nuevo_id, nombre, telefono, "", "Visita",
+        nuevo_id, nombre, telefono, foto_url, plan_nombre,
         f'=IF(F{fila}="","",SWITCH(F{fila},"Visita",50,"Semana",150,"Mes",400,0))',
-        n.strftime("%Y-%m-%d"),
+        n.strftime("%Y-%m-%d") if plan_key in PLANES else "",
         f'=IFERROR(IF(OR(F{fila}="",H{fila}=""),"",SWITCH(PROPER(TRIM(F{fila})),'
         f'"Visita",H{fila},"Semana",H{fila}+7,"Mes",EDATE(H{fila},1),"")),"")',
-        "Pendiente", "Activo", encargado, n.strftime("%Y-%m-%d %H:%M:%S"),
+        estado_pago, "Activo", encargado, n.strftime("%Y-%m-%d %H:%M:%S"),
         f'=IF(B{fila}="","",IFERROR(IF(COUNTIF(Asistencias!C$6:C$500,B{fila})>0,'
         f'MAXIFS(Asistencias!B$6:B$500,Asistencias!C$6:C$500,B{fila}),"—"),"—"))',
         f'=IF(B{fila}="","",COUNTIF(Asistencias!C$6:C$500,B{fila}))',
     ]
 
 
-def sync_nuevo(nombre, telefono, encargado):
+def sync_nuevo(nombre, telefono, foto_url, plan_key, encargado):
     ws = get_sh().worksheet("Socios")
     fila = fila_libre(ws, COL_NOMBRE)
     ids_raw = ws.col_values(COL_ID)[FILA_INICIO - 1:]
@@ -178,7 +186,7 @@ def sync_nuevo(nombre, telefono, encargado):
     nuevo_id = max(ids) + 1 if ids else 1
     ws.update(
         range_name=f"B{fila}:O{fila}",
-        values=[_fila_socio_nueva(fila, nuevo_id, nombre, telefono, encargado)],
+        values=[_fila_socio_nueva(fila, nuevo_id, nombre, telefono, foto_url, plan_key, encargado)],
         value_input_option="USER_ENTERED",
     )
     return nuevo_id, fila
@@ -376,7 +384,7 @@ def pedir_id(args):
 AYUDA = (
     "🏋️ Power Gym – comandos\n\n"
     "SOCIOS\n"
-    "/nuevo Juan Perez 8112345678 – alta (teléfono opcional)\n"
+    "/nuevo – alta de socio interactiva (con foto y plan)\n"
     "/buscar texto – busca por nombre o teléfono\n"
     "/socio 3 – ficha del socio\n"
     "/telefono 3 8112345678 – cambia el teléfono\n\n"
@@ -409,22 +417,106 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(AYUDA, reply_markup=teclado)
 
 
+# ---------------------------------------------------------------- ConversationHandler para /nuevo
 @autorizado
-async def cmd_nuevo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args:
-        await update.message.reply_text("⚠️ Usa: /nuevo Juan Perez 8112345678")
-        return
-    telefono = ""
-    if len(args) > 1 and args[-1].isdigit() and len(args[-1]) >= 10:
-        telefono = args[-1]
-        args = args[:-1]
-    nombre = " ".join(args)
-    nuevo_id, fila = await asyncio.to_thread(sync_nuevo, nombre, telefono, quien(update))
+async def nuevo_inicio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"✅ Socio {nombre} (ID {nuevo_id}) agregado. Queda como Visita / Pendiente.\n"
-        f"Cóbrale con /pago {nuevo_id} visita|semana|mes"
+        "🏋️ **Registro de Nuevo Socio** (Paso 1/4)\n\n"
+        "Escribe el **Nombre completo** del socio:"
     )
+    return NOMBRE
+
+
+async def nuevo_nombre(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['reg_nombre'] = update.message.text.strip()
+    await update.message.reply_text(
+        "📱 **Registro de Nuevo Socio** (Paso 2/4)\n\n"
+        "Escribe el número de **Teléfono** (o escribe 'ninguno'):"
+    )
+    return TELEFONO
+
+
+async def nuevo_telefono(update: ContextTypes.DEFAULT_TYPE, update_obj: Update = None):
+    # Soporte compatible para el mensaje
+    pass
+
+
+async def recibir_telefono(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['reg_telefono'] = update.message.text.strip()
+    await update.message.reply_text(
+        "🖼️ **Registro de Nuevo Socio** (Paso 3/4)\n\n"
+        "Envía el enlace o **URL de la foto** del socio (o escribe 'ninguna'):"
+    )
+    return FOTO
+
+
+async def recibir_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['reg_foto'] = update.message.text.strip()
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("🎟️ Visita ($50)", callback_data="plan_visita"),
+            InlineKeyboardButton("📅 Semana ($150)", callback_data="plan_semana"),
+        ],
+        [
+            InlineKeyboardButton("📆 Mes ($400)", callback_data="plan_mes"),
+            InlineKeyboardButton("❌ Sin plan (Pendiente)", callback_data="plan_ninguno"),
+        ]
+    ]
+    await update.message.reply_text(
+        "📋 **Registro de Nuevo Socio** (Paso 4/4)\n\n"
+        "Selecciona el **Plan contratado** para el socio:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return PLAN
+
+
+async def recibir_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    
+    data = q.data
+    plan_key = data.replace("plan_", "")
+    
+    nombre = context.user_data.get('reg_nombre')
+    telefono = context.user_data.get('reg_telefono', '')
+    if telefono.lower() in ['ninguno', 'ninguna', 's/n', '-']:
+        telefono = ''
+        
+    foto = context.user_data.get('reg_foto', '')
+    if foto.lower() in ['ninguna', 'ninguno', 's/n', '-']:
+        foto = ''
+        
+    encargado = quien(update)
+    
+    nuevo_id, fila = await asyncio.to_thread(
+        sync_nuevo, nombre, telefono, foto, plan_key, encargado
+    )
+    
+    plan_texto = plan_key.capitalize() if plan_key in PLANES else "Ninguno (Pendiente)"
+    
+    texto_res = (
+        f"✅ **¡Socio registrado con éxito!**\n\n"
+        f"🆔 **ID:** {nuevo_id}\n"
+        f"👤 **Nombre:** {nombre}\n"
+        f"📱 **Teléfono:** {telefono or 'No registrado'}\n"
+        f"🖼️ **Foto URL:** {foto or 'No registrada'}\n"
+        f"📋 **Plan Inicial:** {plan_texto}"
+    )
+    
+    try:
+        await q.edit_message_text(text=texto_res, parse_mode="Markdown")
+    except Exception:
+        await q.message.reply_text(texto_res, parse_mode="Markdown")
+        
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def cancelar_registro(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("❌ Registro de socio cancelado.")
+    return ConversationHandler.END
 
 
 @autorizado
@@ -549,6 +641,7 @@ async def cmd_socio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"👤 {s['nombre']} (ID {s['id']})\n"
         f"Tel: {s['tel'] or 's/n'}\n"
+        f"Foto URL: {s['foto'] or 's/n'}\n"
         f"Plan: {s['plan']} {s['monto']} · {s['pago']} · {s['estado']}\n"
         f"Inicio: {s['inicio']} · Vence: {s['proximo'] or 's/f'} "
         f"({estatus_de(s['proximo'])})\n"
@@ -752,7 +845,7 @@ async def post_init(app):
         BotCommand("asistencia", "Registrar asistencia (lista con casillas)"),
         BotCommand("hoy", "Quién ha llegado hoy"),
         BotCommand("pago", "Cobrar: /pago ID visita|semana|mes"),
-        BotCommand("nuevo", "Alta de socio"),
+        BotCommand("nuevo", "Alta de socio interactiva"),
         BotCommand("buscar", "Buscar socio por nombre o teléfono"),
         BotCommand("socio", "Ficha de un socio"),
         BotCommand("vencidos", "Socios por cobrar"),
@@ -764,14 +857,29 @@ async def post_init(app):
 
 def main():
     app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
+    
+    # Manejador de conversación para /nuevo (Paso a paso)
+    conv_nuevo = ConversationHandler(
+        entry_points=[CommandHandler("nuevo", nuevo_inicio)],
+        states={
+            NOMBRE: [MessageHandler(filters.TEXT & ~filters.COMMAND, nuevo_nombre)],
+            TELEFONO: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_telefono)],
+            FOTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_foto)],
+            PLAN: [CallbackQueryHandler(recibir_plan_callback, pattern="^plan_")],
+        },
+        fallbacks=[CommandHandler("cancelar", cancelar_registro)],
+    )
+    app.add_handler(conv_nuevo)
+
     for nombre, f in [
         ("id", cmd_id), ("start", cmd_start), ("ayuda", cmd_start),
-        ("nuevo", cmd_nuevo), ("pago", cmd_pago), ("asistencia", cmd_asistencia),
+        ("pago", cmd_pago), ("asistencia", cmd_asistencia),
         ("deshacer", cmd_deshacer), ("hoy", cmd_hoy), ("buscar", cmd_buscar),
         ("socio", cmd_socio), ("vencidos", cmd_vencidos), ("telefono", cmd_telefono),
         ("baja", cmd_baja), ("alta", cmd_alta), ("corte", cmd_corte),
     ]:
         app.add_handler(CommandHandler(nombre, f))
+        
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_error_handler(on_error)
     log.info("Bot de Power Gym iniciado")
