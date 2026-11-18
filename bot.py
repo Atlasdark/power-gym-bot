@@ -6,7 +6,6 @@ import threading
 from datetime import datetime, timedelta
 from functools import wraps
 from zoneinfo import ZoneInfo
-from dateutil.relativedelta import relativedelta
 
 import gspread
 from flask import Flask
@@ -338,7 +337,12 @@ def sync_vencidos():
             if "semana" in plan_lower:
                 fecha_vencimiento = d_inicio + timedelta(days=7)
             elif "mes" in plan_lower:
-                fecha_vencimiento = d_inicio + relativedelta(months=1)
+                # Sumar aproximadamente 30 días o un mes de forma nativa
+                try:
+                    fecha_vencimiento = d_inicio.replace(month=d_inicio.month + 1 if d_inicio.month < 12 else 1, 
+                                                         year=d_inicio.year if d_inicio.month < 12 else d_inicio.year + 1)
+                except ValueError:
+                    fecha_vencimiento = d_inicio + timedelta(days=30)
             elif "visita" in plan_lower:
                 fecha_vencimiento = d_inicio
             else:
