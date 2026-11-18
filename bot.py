@@ -812,5 +812,387 @@ async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"📋 {dia} {ahora():%d/%m}: aún no hay asistencias.")
         return
     venc = sum(1 for a in filas if a["estatus"] != "Al corriente")
-    lineas = [f"📋 {dia} {ahora():%d/%m}: {len(filas)} asistencias"
-              + (f" ({venc} vencidos
+    lineas = [f"📋 {dia} {ahora():%d/%m}: {len(filas)} asistencias" + (f" ({venc} vencidos)" if venc else "")]
+    for a in filas[:60]:
+        icono = "✅" if a["estatus"] == "Al corriente" else "⚠️"
+        lineas.append(f"{icono} {a['fecha'][11:16]} · {a['nombre']} (ID {a['id']})")
+    await update.message.reply_text("\n".join(lineas))
+
+
+# ---------------------------------------------------------------- Comando unificado /socio (Búsqueda por ID, nombre o teléfono)
+@autorizado
+async def cmd_socio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("⚠️ Usa: /socio 3   (o /socio Juan, o /socio 8112345678)")
+        return
+    
+    query = " ".join(context.args)
+    ws = get_sh().worksheet("Socios")
+    res = await asyncio.to_thread(buscar_socio_flexible, ws, query)
+    
+    if not res:
+        await update.message.reply_text(f"❌ No encontré ningún socio con: '{query}'.")
+        return
+        
+    # Si encuentra exactamente uno o es búsqueda por ID, muestra la ficha completa
+    if len(res) == 1:
+        s = res[0]
+        await update.message.reply_text(
+            f"👤 **{s['nombre']}** (ID {s['id']})\n"
+            f"Tel: {s['tel'] or 's/n'}\n"
+            f"Foto URL: {s['foto'] or 's/n'}\n"
+            f"Plan: {s['plan']} ${s['monto']} · {s['pago']} · {s['estado']}\n"
+            f"Inicio: {s['inicio']} · Vence: {s['proximo'] or 's/f'} "
+            f"({estatus_de(s['proximo'])})\n"
+            f"Asistencias: {s['total'] or 0} · Última: {s['ultima'] or '—'}",
+            parse_mode="Markdown"
+        )
+    else:
+        # Si hay varios con el mismo nombre o teléfono, lista las opciones
+        lineas = [f"🔍 Encontré {len(res)} socios con '{query}':"]
+        for s in res[:10]:
+            lineas.append(f"• ID {s['id']} · **{s['nombre']}** ({s['plan']}) - Vence: {s['proximo'] or 's/f'}")
+        lineas.append("\nUsa `/socio <ID>` para ver la ficha detallada.")
+        await update.message.reply_text("\n".join(lineas), parse_mode="Markdown")
+
+
+@autorizado
+async def cmd_vencidos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    res = await asyncio.to_thread(sync_vencidos)
+    if not res:
+        await update.message.reply_text("🎉 No hay socios vencidos ni pendientes.")
+        return
+    lineas = [f"⚠️ {len(res)} socios por cobrar:"]
+    for s in res[:40]:
+        dias = s.get("dias", 0)
+        cuando = f"venció hace {dias} día(s)" if dias > 0 else f"vence {s['proximo'] or 's/f'}"
+        extra = " · pago PENDIENTE" if s["pago"] == "Pendiente" else ""
+        lineas.append(f"ID {s['id']} · {s['nombre']} · {cuando}{extra} · {s['tel'] or 's/n'}")
+    await update.message.reply_text("\n".join(lineas))
+
+
+@solo_admin
+async def cmd_baja(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not pedir_id(context.args):
+        await update.message.reply_text("⚠️ Usa: /baja 3")
+        return
+    n = await asyncio.to_thread(sync_set, context.args[0], "K", "Inactivo")
+    await update.message.reply_text(
+        f"🚫 {n} quedó Inactivo." if n else f"❌ No existe el socio {context.args[0]}.")
+
+
+@solo_admin
+async def cmd_alta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not pedir_id(context.args):
+        await update.message.reply_text("⚠️ Usa: /alta 3")
+        return
+    n = await asyncio.to_thread(sync_set, context.args[0], "K", "Activo")
+    await update.message.reply_text(
+        f"✅ {n} quedó Activo." if n else f"❌ No existe el socio {context.args[0]}.")
+
+
+async def _texto_corte(modo):
+    d, total, n, por = await asyncio.to_thread(sync_corte, modo)
+    titulo = "esta semana" if modo == "semana" else "hoy"
+    lineas = [
+        f"📊 Corte {titulo}: ${total:,.0f} ({n} cobros)",
+    ]
+    for nombre, m in sorted(por.items()):
+        lineas.append(f"  · {nombre or 'sin nombre'}: ${m:,.0f}")
+    lineas.append(f"\nSocios: {d[0]} | Activos: {d[1]} | Inactivos: {d[2]} | "
+                  f"Pendientes: {d[3]}")
+    return "\n".join(lineas)
+
+
+@solo_admin
+async def cmd_corte(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    modo = "semana" if context.args and context.args[0].lower() == "semana" else "hoy"
+    await update.message.reply_text(await _texto_corte(modo))
+
+
+@autorizado
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    
+    if q.data == "ver_corte" and q.from_user.id == ADMIN_ID:
+        await q.answer()
+        await q.message.reply_text(await _texto_corte("hoy"))
+        return
+
+    # ------------------ Manejadores para el control interactivo de /cobros ------------------
+    if q.data.startswith("cobro_tog_"):
+        socio_id = q.data.replace("cobro_tog_", "")
+        key = (q.message.chat.id, q.message.message_id)
+        if key not in COBROS_SELECCIONES:
+            COBROS_SELECCIONES[key] = set()
+        
+        selected = COBROS_SELECCIONES[key]
+        if socio_id in selected:
+            selected.remove(socio_id)
+        else:
+            selected.add(socio_id)
+            
+        ws = get_sh()
+        socios = await asyncio.to_thread(socios_filas, ws.worksheet("Socios"))
+        hoy = ahora().date()
+        
+        por_cobrar = []
+        for s in socios:
+            if s["estado"] != "Activo":
+                continue
+            d = parse_fecha(s["proximo"])
+            if (d is not None and d <= hoy) or s["pago"] == "Pendiente":
+                dias_tarde = (hoy - d).days if (d is not None and d < hoy) else 0
+                s["dias_tarde"] = dias_tarde
+                s["vence_hoy"] = (d == hoy)
+                por_cobrar.append(s)
+        
+        keyboard = []
+        for s in por_cobrar:
+            icono = "✅" if s['id'] in selected else "⭕"
+            if s["vence_hoy"]:
+                estado_txt = "📅 Vence HOY"
+            elif s["dias_tarde"] > 0:
+                estado_txt = f"⚠️ Venció hace {s['dias_tarde']}d"
+            else:
+                estado_txt = "💳 Pendiente"
+                
+            plan_lower = s["plan"].lower()
+            monto_txt = "$50" if "visita" in plan_lower else ("$150" if "semana" in plan_lower else "$400")
+            
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{icono} [ID {s['id']}] {s['nombre']} ({s['plan']} {monto_txt}) - {estado_txt}", 
+                    callback_data=f"cobro_tog_{s['id']}"
+                )
+            ])
+        
+        keyboard.append([InlineKeyboardButton("💾 Marcar seleccionados como PAGADOS", callback_data="cobro_save")])
+        
+        hoy_str = ahora().strftime("%d/%m/%Y")
+        try:
+            await q.edit_message_text(
+                text=f"📊 **CONTROL DE COBROS DEL DÍA: {hoy_str}**\n"
+                     f"📋 Toca los socios que **ya pagaron** para seleccionarlos y presiona Guardar:\n\n"
+                     f"📌 *Seleccionados:* {len(selected)} de {len(por_cobrar)}",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+        await q.answer()
+        return
+
+    if q.data == "cobro_save":
+        key = (q.message.chat.id, q.message.message_id)
+        selected = COBROS_SELECCIONES.get(key, set())
+        
+        if not selected:
+            await q.answer("⚠️ No has seleccionado ningún socio.", show_alert=True)
+            return
+            
+        enc = quien(update) or "Admin"
+        sh = get_sh()
+        ws_socios = sh.worksheet("Socios")
+        todos_socios = await asyncio.to_thread(socios_filas, ws_socios)
+        
+        pagados_ok = []
+        
+        def procesar_lote_cobros():
+            for socio_id in selected:
+                socio = next((s for s in todos_socios if s["id"] == socio_id), None)
+                if not socio:
+                    continue
+                plan_lower = socio["plan"].lower()
+                plan_key = "visita" if "visita" in plan_lower else ("semana" if "semana" in plan_lower else "mes")
+                sync_pago(socio_id, plan_key, enc)
+                pagados_ok.append(socio["nombre"])
+
+        await asyncio.to_thread(procesar_lote_cobros)
+        COBROS_SELECCIONES.pop(key, None)
+        
+        texto_res = (
+            f"✅ **¡Corte y pagos actualizados con éxito!**\n\n"
+            f"👤 **Total de socios que pagaron en este bloque:** {len(pagados_ok)}\n"
+            f"• Nombres: {', '.join(pagados_ok)}\n"
+            f"👨‍💼 **Registrado por:** {enc}"
+        )
+        
+        try:
+            await q.edit_message_text(text=texto_res, parse_mode="Markdown")
+        except Exception:
+            await q.message.reply_text(texto_res, parse_mode="Markdown")
+        await q.answer("¡Pagos guardados correctamente!")
+        return
+    # ---------------------------------------------------------------------------------------
+
+    if q.data.startswith("asis_tog_"):
+        socio_id = q.data.replace("asis_tog_", "")
+        key = (q.message.chat.id, q.message.message_id)
+        if key not in ASISTENCIA_SELECCIONES:
+            ASISTENCIA_SELECCIONES[key] = set()
+        
+        selected = ASISTENCIA_SELECCIONES[key]
+        if socio_id in selected:
+            selected.remove(socio_id)
+        else:
+            selected.add(socio_id)
+            
+        def obtener_activos():
+            sh = get_sh()
+            return [s for s in socios_filas(sh.worksheet("Socios")) if s["estado"] == "Activo"]
+
+        socios_activos = await asyncio.to_thread(obtener_activos)
+        
+        keyboard = []
+        for s in socios_activos:
+            icono = "✅" if s['id'] in selected else "⭕"
+            keyboard.append([InlineKeyboardButton(f"{icono} {s['nombre']} (ID {s['id']})", callback_data=f"asis_tog_{s['id']}")])
+        
+        keyboard.append([InlineKeyboardButton("💾 Guardar asistencias seleccionadas", callback_data="asis_save")])
+        
+        hoy_str = ahora().strftime("%d/%m/%Y")
+        try:
+            await q.edit_message_text(
+                text=f"📅 **Fecha de hoy: {hoy_str}**\n📋 Toca los socios que llegaron y presiona Guardar:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+        await q.answer()
+        return
+
+    # Guardar las asistencias múltiples seleccionadas de golpe
+    if q.data == "asis_save":
+        key = (q.message.chat.id, q.message.message_id)
+        selected = ASISTENCIA_SELECCIONES.get(key, set())
+        
+        if not selected:
+            await q.answer("⚠️ No has seleccionado ningún socio.", show_alert=True)
+            return
+            
+        enc = quien(update) or "Admin"
+        sh = get_sh()
+        ws_socios = sh.worksheet("Socios")
+        wa = sh.worksheet("Asistencias")
+        
+        todos_socios = await asyncio.to_thread(socios_filas, ws_socios)
+        rows_asist = await asyncio.to_thread(asistencias_rows, wa)
+        hoy_str = ahora().strftime("%Y-%m-%d")
+        
+        asistidos_hoy = {a["id"] for a in rows_asist if a["fecha"][:10] == hoy_str}
+        
+        nuevas_filas = []
+        registrados = []
+        duplicados = []
+        
+        proxima_fila = rows_asist[-1]["fila"] + 1 if rows_asist else FILA_INICIO
+        
+        for socio_id in selected:
+            socio = next((s for s in todos_socios if s["id"] == socio_id), None)
+            if not socio:
+                continue
+                
+            if socio_id in asistidos_hoy:
+                duplicados.append(socio["nombre"])
+                continue
+                
+            estatus = estatus_de(socio["proximo"])
+            nuevas_filas.append([
+                ahora().strftime("%Y-%m-%d %H:%M:%S"),
+                int(socio["id"]),
+                f'=IFERROR(VLOOKUP(C{proxima_fila},Socios!B$6:C$500,2,FALSE),"")',
+                enc,
+                estatus,
+            ])
+            registrados.append(socio["nombre"])
+            proxima_fila += 1
+            
+        if nuevas_filas:
+            fin_fila = proxima_fila - 1
+            inicio_fila = fin_fila - len(nuevas_filas) + 1
+            def escribir_lote():
+                wa.update(
+                    range_name=f"B{inicio_fila}:F{fin_fila}",
+                    values=nuevas_filas,
+                    value_input_option="USER_ENTERED",
+                )
+                sync_semana(sh)
+            await asyncio.to_thread(escribir_lote)
+            
+        ASISTENCIA_SELECCIONES.pop(key, None)
+        
+        texto_fin = f"✅ **¡Asistencias guardadas con éxito!**\n"
+        if registrados:
+            texto_fin += f"• Registrados: {', '.join(registrados)}\n"
+        if duplicados:
+            texto_fin += f"• Ya tenían asistencia hoy: {', '.join(duplicados)}"
+            
+        try:
+            await q.edit_message_text(text=texto_fin, parse_mode="Markdown")
+        except Exception:
+            await q.message.reply_text(texto_fin, parse_mode="Markdown")
+        await q.answer("¡Guardado correctamente!")
+        return
+
+
+async def on_error(update, context):
+    log.error("Error no controlado", exc_info=context.error)
+
+
+async def post_init(app):
+    await app.bot.set_my_commands([
+        BotCommand("asistencia", "Registrar asistencia (lista con casillas)"),
+        BotCommand("hoy", "Quién ha llegado hoy"),
+        BotCommand("cobros", "Control de cobros del día con casillas"),
+        BotCommand("pendientes", "Reporte de pagos pendientes"),
+        BotCommand("estats", "Resumen general con nombres detallados"),
+        BotCommand("pago", "Cobrar directo: /pago ID visita|semana|mes"),
+        BotCommand("nuevo", "Alta de socio interactiva"),
+        BotCommand("socio", "Ficha de socio o búsqueda flexible"),
+        BotCommand("ayudante", "Registrar nuevo ayudante (admin)"),
+        BotCommand("vencidos", "Socios por cobrar"),
+        BotCommand("deshacer", "Borrar última asistencia"),
+        BotCommand("corte", "Corte de caja (admin)"),
+        BotCommand("start", "Menú de ayuda"),
+    ])
+
+
+def main():
+    app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
+    
+    # Manejador de conversación para /nuevo (Paso a paso)
+    conv_nuevo = ConversationHandler(
+        entry_points=[CommandHandler("nuevo", nuevo_inicio)],
+        states={
+            NOMBRE: [MessageHandler(filters.TEXT & ~filters.COMMAND, nuevo_nombre)],
+            TELEFONO: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_telefono)],
+            FOTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_foto)],
+            PLAN: [CallbackQueryHandler(recibir_plan_callback, pattern="^plan_")],
+        },
+        fallbacks=[CommandHandler("cancelar", cancelar_registro)],
+    )
+    app.add_handler(conv_nuevo)
+
+    for nombre, f in [
+        ("id", cmd_id), ("start", cmd_start),
+        ("pago", cmd_pago), ("asistencia", cmd_asistencia),
+        ("cobros", cmd_cobros), ("pendientes", cmd_pendientes),
+        ("estats", cmd_estats), ("resumen", cmd_estats),
+        ("ayudante", cmd_ayudante), ("deshacer", cmd_deshacer),
+        ("hoy", cmd_hoy), ("socio", cmd_socio), ("buscar", cmd_socio),
+        ("vencidos", cmd_vencidos), ("baja", cmd_baja), ("alta", cmd_alta),
+        ("corte", cmd_corte),
+    ]:
+        app.add_handler(CommandHandler(nombre, f))
+        
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_error_handler(on_error)
+    log.info("Bot de Power Gym iniciado")
+    app.run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    threading.Thread(target=run_flask, daemon=True).start()
+    main()
