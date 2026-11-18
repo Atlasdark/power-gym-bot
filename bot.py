@@ -1,6 +1,20 @@
+import os
 import logging
+import threading
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler
+from flask import Flask
+
+# Servidor Flask mínimo para abrir el puerto web que Render exige en el plan gratuito
+app_flask = Flask(__name__)
+
+@app_flask.route('/')
+def home():
+    return "Bot de Power Gym activo 24/7 🚀"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app_flask.run(host="0.0.0.0", port=port)
 
 # Token que te dio BotFather
 TOKEN = "9065819143:AAFXchOFFdp_0BDFv-6wgilhuzZ_mSYr3UA"
@@ -12,7 +26,6 @@ logging.basicConfig(
 )
 
 # IDs de Telegram de tus encargados y tuyo (Administrador)
-# (Aquí agregaremos los números de ID reales de cada empleado para control de seguridad)
 ADMIN_ID = 123456789  # <--- Pon aquí tu ID de Telegram
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -58,4 +71,10 @@ def main():
     app.run_polling()
 
 if __name__ == '__main__':
+    # 1. Iniciamos Flask en un hilo separado para que abra el puerto web requerido por Render
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+
+    # 2. Ejecutamos el bot de Telegram
     main()
