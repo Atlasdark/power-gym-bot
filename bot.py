@@ -36,26 +36,21 @@ def run_flask():
 
 
 # ---------------------------------------------------------------- Configuración
-TOKEN = os.environ["TELEGRAM_TOKEN"]             # variable de entorno en Render
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))  # tu ID (te lo da /id)
+TOKEN = os.environ["TELEGRAM_TOKEN"]             
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))  
 SHEET_ID = os.environ.get("SHEET_ID", "1lB4AhcWawk3cSeBHGWXwQxZ3PvYgSsDtxKPscuI75IQ")
 TZ = ZoneInfo("America/Mexico_City")
 
-# ID de Telegram -> nombre EXACTO del dropdown "registrado_por" de la hoja.
 ENCARGADOS = {
     9243005111: "ADOLFO",
-    # 222222222: "DIEGO",
-    # 333333333: "KEVIN",
 }
 
 PLANES = {"visita": ("Visita", 50), "semana": ("Semana", 150), "mes": ("Mes", 400)}
 
-# Estructura de la hoja (los datos empiezan en la fila 6, columna B)
 FILA_INICIO = 6
-COL_ID, COL_NOMBRE = 2, 3  # B, C
+COL_ID, COL_NOMBRE = 2, 3  
 DIAS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
 
-# Memoria temporal para la selección múltiple de asistencia: {(chat_id, message_id): set([id1, id2...])}
 ASISTENCIA_SELECCIONES = {}
 
 # ---------------------------------------------------------------- Utilidades
@@ -89,7 +84,6 @@ def parse_fecha(s):
 
 
 def estatus_de(proximo):
-    """Al corriente si proximo_pago es hoy o después; si no, Vencido."""
     d = parse_fecha(proximo)
     return "Al corriente" if d and d >= ahora().date() else "Vencido"
 
@@ -102,21 +96,27 @@ def num(s):
 
 
 def fila_libre(ws, col):
-    """Primera fila vacía en la columna dada, nunca antes de la fila 6."""
     return max(len(ws.col_values(col)) + 1, FILA_INICIO)
 
 
 def socios_filas(ws):
-    """Todos los socios (fila 6 en adelante) como lista de dicts."""
+    """Lee todos los socios de forma segura soportando cualquier formato de ID."""
     out = []
-    for i, r in enumerate(ws.get("B6:O1000"), start=FILA_INICIO):
+    try:
+        rows = ws.get(f"B{FILA_INICIO}:O1500")
+    except Exception:
+        rows = []
+        
+    for i, r in enumerate(rows, start=FILA_INICIO):
         r = list(r) + [""] * (14 - len(r))
-        if not r[0].strip():
+        socio_id = str(r[0]).strip()
+        nombre = str(r[1]).strip()
+        if not socio_id or not nombre:
             continue
         out.append({
-            "fila": i, "id": r[0].strip(), "nombre": r[1], "tel": r[2],
-            "plan": r[4], "monto": r[5], "inicio": r[6], "proximo": r[7],
-            "pago": r[8], "estado": r[9], "encargado": r[10],
+            "fila": i, "id": socio_id, "nombre": nombre, "tel": str(r[2]).strip(),
+            "plan": str(r[4]).strip(), "monto": r[5], "inicio": r[6], "proximo": r[7],
+            "pago": str(r[8]).strip(), "estado": str(r[9]).strip(), "encargado": r[10],
             "ultima": r[12], "total": r[13],
         })
     return out
@@ -131,23 +131,25 @@ def buscar_socio(ws, socio_id):
 
 def asistencias_rows(wa):
     out = []
-    for i, r in enumerate(wa.get("B6:F1000"), start=FILA_INICIO):
+    try:
+        rows = wa.get(f"B{FILA_INICIO}:F1500")
+    except Exception:
+        rows = []
+    for i, r in enumerate(rows, start=FILA_INICIO):
         r = list(r) + [""] * (5 - len(r))
-        if not r[0].strip():
+        if not str(r[0]).strip() or not str(r[1]).strip():
             continue
-        out.append({"fila": i, "fecha": r[0], "id": r[1].strip(),
-                    "nombre": r[2], "por": r[3], "estatus": r[4]})
+        out.append({"fila": i, "fecha": str(r[0]), "id": str(r[1]).strip(),
+                    "nombre": str(r[2]), "por": str(r[3]), "estatus": str(r[4])})
     return out
 
 
 def get_pagos_ws(sh):
-    """Pestaña 'Pagos' (bitácora de cada cobro). Se crea sola si no existe."""
     try:
         return sh.worksheet("Pagos")
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title="Pagos", rows=2000, cols=8)
-        ws.append_row(["fecha_hora", "id_socio", "nombre", "plan", "monto",
-                       "registrado_por"])
+        ws.append_row(["fecha_hora", "id_socio", "nombre", "plan", "monto", "registrado_por"])
         ws.freeze(rows=1)
         return ws
 
@@ -171,7 +173,8 @@ def _fila_socio_nueva(fila, nuevo_id, nombre, telefono, encargado):
 def sync_nuevo(nombre, telefono, encargado):
     ws = get_sh().worksheet("Socios")
     fila = fila_libre(ws, COL_NOMBRE)
-    ids = [int(v) for v in ws.col_values(COL_ID)[FILA_INICIO - 1:] if v.strip().isdigit()]
+    ids_raw = ws.col_values(COL_ID)[FILA_INICIO - 1:]
+    ids = [int(v) for v in ids_raw if str(v).strip().isdigit()]
     nuevo_id = max(ids) + 1 if ids else 1
     ws.update(
         range_name=f"B{fila}:O{fila}",
@@ -221,7 +224,7 @@ def sync_semana(sh):
         d = parse_fecha(a["fecha"])
         if d and lunes <= d <= lunes + timedelta(days=5):
             marcas.add((a["id"], (d - lunes).days))
-    matriz = [[(v.strip(), dia) in marcas for dia in range(6)]
+    matriz = [[(str(v).strip(), dia) in marcas for dia in range(6)]
               for v in ids[FILA_INICIO - 1:]]
     ws.update(range_name=f"P{FILA_INICIO}:U{ultima}", values=matriz,
               value_input_option="USER_ENTERED")
@@ -245,7 +248,7 @@ def procesar_registro_asistencia(sh, socio_id, encargado):
         values=[[
             ahora().strftime("%Y-%m-%d %H:%M:%S"),
             int(s["id"]),
-            f'=IFERROR(VLOOKUP(C{fa},Socios!B$6:C$50,2,FALSE),"")',
+            f'=IFERROR(VLOOKUP(C{fa},Socios!B$6:C$500,2,FALSE),"")',
             encargado,
             estatus,
         ]],
@@ -442,7 +445,6 @@ async def cmd_pago(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @autorizado
 async def cmd_asistencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Si pasa un ID por argumento, lo procesa directo como antes
     if pedir_id(context.args):
         r = await asyncio.to_thread(procesar_registro_asistencia, get_sh(), context.args[0], quien(update))
         if r is None:
@@ -460,7 +462,6 @@ async def cmd_asistencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("\n".join(lineas))
         return
 
-    # Si no pasa argumentos, genera la lista interactiva con fecha y casillas
     def obtener_activos():
         sh = get_sh()
         return [s for s in socios_filas(sh.worksheet("Socios")) if s["estado"] == "Activo"]
@@ -486,7 +487,6 @@ async def cmd_asistencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
     
-    # Inicializar el set de seleccionados vacío para este mensaje
     ASISTENCIA_SELECCIONES[(chat_id, msg.message_id)] = set()
 
 
@@ -627,15 +627,13 @@ async def cmd_corte(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     
-    # Manejo del botón de corte de caja
     if q.data == "ver_corte" and q.from_user.id == ADMIN_ID:
         await q.answer()
         await q.message.reply_text(await _texto_corte("hoy"))
         return
 
-    # Manejo de casillas de verificación de asistencia
     if q.data.startswith("asis_tog_"):
-        socio_id = q.data.split("_")[2]
+        socio_id = q.data.replace("asis_tog_", "")
         key = (q.message.chat.id, q.message.message_id)
         if key not in ASISTENCIA_SELECCIONES:
             ASISTENCIA_SELECCIONES[key] = set()
@@ -660,15 +658,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("💾 Guardar asistencias seleccionadas", callback_data="asis_save")])
         
         hoy_str = ahora().strftime("%d/%m/%Y")
-        await q.edit_message_text(
-            text=f"📅 **Fecha de hoy: {hoy_str}**\n📋 Toca los socios que llegaron y presiona Guardar:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
+        try:
+            await q.edit_message_text(
+                text=f"📅 **Fecha de hoy: {hoy_str}**\n📋 Toca los socios que llegaron y presiona Guardar:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
         await q.answer()
         return
 
-    # Guardar las asistencias múltiples seleccionadas
     if q.data == "asis_save":
         key = (q.message.chat.id, q.message.message_id)
         selected = ASISTENCIA_SELECCIONES.get(key, set())
@@ -677,7 +677,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("⚠️ No has seleccionado ningún socio.", show_alert=True)
             return
             
-        # Corrección: Obtener el nombre del encargado de forma segura para los botones
         enc = ENCARGADOS.get(q.from_user.id, "Admin")
         sh = get_sh()
         registrados = []
@@ -691,7 +690,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     registrados.append(r["nombre"])
                     
-        # Limpiar memoria de esta sesión
         ASISTENCIA_SELECCIONES.pop(key, None)
         
         texto_fin = f"✅ **¡Asistencias guardadas con éxito!**\n"
@@ -700,7 +698,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if duplicados:
             texto_fin += f"• Ya tenían asistencia hoy: {', '.join(duplicados)}"
             
-        await q.edit_message_text(text=texto_fin, parse_mode="Markdown")
+        try:
+            await q.edit_message_text(text=texto_fin, parse_mode="Markdown")
+        except Exception:
+            await q.message.reply_text(texto_fin, parse_mode="Markdown")
         await q.answer("¡Guardado correctamente!")
         return
 
