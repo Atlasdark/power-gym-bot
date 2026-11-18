@@ -29,10 +29,8 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# ⚠️ Tu ID de Administrador de Telegram
-ADMIN_ID = 123456789  
+ADMIN_ID = 123456789  # <--- Tu ID de Administrador
 
-# Conexión flexible con Google Sheets (prueba minúsculas y mayúsculas)
 def conectar_sheets():
     try:
         credentials_info = json.loads(os.environ.get("GOOGLE_CREDENTIALS_JSON"))
@@ -40,7 +38,6 @@ def conectar_sheets():
         creds = Credentials.from_service_account_info(credentials_info, scopes=scope)
         client = gspread.authorize(creds)
         
-        # Intenta abrir la hoja sin importar si está en minúsculas o mayúsculas
         try:
             spreadsheet = client.open("power gym")
         except:
@@ -52,7 +49,6 @@ def conectar_sheets():
         print(f"Error al conectar con Google Sheets: {e}")
         return None
 
-# Comando /start (Menú Principal)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name
@@ -75,7 +71,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# Comando /nuevo (Ejemplo: /nuevo Carlos Mendoza)
 async def nuevo_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
@@ -89,13 +84,18 @@ async def nuevo_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sheet = conectar_sheets()
     if sheet:
         try:
-            # Obtener el ID siguiente basado en las filas existentes
-            all_values = sheet.get_all_values()
-            next_id = len(all_values) - 4  # Descontando las filas superiores de títulos
-            if next_id < 1:
-                next_id = 1
+            # Obtener todos los valores de la columna ID (Columna A) para calcular el siguiente ID real
+            columna_ids = sheet.col_values(1)
+            numeric_ids = []
+            for val in columna_ids:
+                try:
+                    numeric_ids.append(int(val))
+                except ValueError:
+                    pass
+            
+            next_id = max(numeric_ids) + 1 if numeric_ids else 1
 
-            # Estructura exacta de columnas según tu diseño:
+            # Fila exacta alineada a tus columnas:
             # [id, nombre, telefono, foto_url, plan, monto, fecha_inicio, proximo_pago, estado_pago, asistencia, registrado_por][cite: 5]
             fila_nueva = [
                 next_id,
@@ -110,44 +110,38 @@ async def nuevo_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Activo",
                 encargado
             ]
-            sheet.append_row(fila_nueva)
-            await update.message.reply_text(f"✅ Socio **{nombre_cliente}** (ID: {next_id}) agregado a Google Sheets por **{encargado}**.", parse_mode="Markdown")
+            
+            # Usar append_row asegurando inserción limpia
+            sheet.append_row(fila_nueva, value_input_option='USER_ENTERED')
+            
+            await update.message.reply_text(
+                f"✅ Socio **{nombre_cliente}** (ID: {next_id}) agregado correctamente en la tabla por **{encargado}**.", 
+                parse_mode="Markdown"
+            )
         except Exception as e:
             await update.message.reply_text(f"❌ Error al guardar en Sheets: {e}")
     else:
         await update.message.reply_text("❌ No se pudo conectar con Google Sheets.")
 
-# Manejador de botones interactivos
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     encargado = (query.from_user.first_name or "ADMIN").upper()
     fecha_hoy = datetime.now().strftime("%Y-%m-%d")
     
     if query.data == "registrar_asistencia":
         await query.edit_message_text(text=f"✅ Asistencia registrada por **{encargado}** el {fecha_hoy}.", parse_mode="Markdown")
-        
     elif query.data in ["pago_visita", "pago_semana", "pago_mes"]:
-        planes = {
-            "pago_visita": ("Visita", "$50"), 
-            "pago_semana": ("Semana", "$150"), 
-            "pago_mes": ("Mes", "$400")
-        }
-        plan_seleccionado, monto = planes[query.data]
-        await query.edit_message_text(text=f"💰 Plan **{plan_seleccionado} ({monto})** procesado por **{encargado}**.", parse_mode="Markdown")
-        
-    elif query.data == "ver_corte":
-        await query.edit_message_text(text="📊 Panel de Corte y Estadísticas generales.")
+        planes = {"pago_visita": ("Visita", "$50"), "pago_semana": ("Semana", "$150"), "pago_mes": ("Mes", "$400")}
+        plan_sel, monto = planes[query.data]
+        await query.edit_message_text(text=f"💰 Plan **{plan_sel} ({monto})** procesado por **{encargado}**.", parse_mode="Markdown")
 
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("nuevo", nuevo_cliente))
     app.add_handler(CallbackQueryHandler(button_handler))
-
-    print("🤖 Bot de Power Gym sincronizado con Google Sheets...")
+    print("🤖 Bot de Power Gym sincronizado correctamente...")
     app.run_polling()
 
 if __name__ == '__main__':
