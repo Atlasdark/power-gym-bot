@@ -32,15 +32,21 @@ logging.basicConfig(
 # ⚠️ Tu ID de Administrador de Telegram
 ADMIN_ID = 123456789  
 
-# Conexión con Google Sheets (Apunta a la pestaña "Socios")
+# Conexión flexible con Google Sheets (prueba minúsculas y mayúsculas)
 def conectar_sheets():
     try:
         credentials_info = json.loads(os.environ.get("GOOGLE_CREDENTIALS_JSON"))
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds = Credentials.from_service_account_info(credentials_info, scopes=scope)
         client = gspread.authorize(creds)
-        # Selecciona la pestaña "Socios" de tu hoja "Power Gym"
-        sheet = client.open("Power Gym").worksheet("Socios")
+        
+        # Intenta abrir la hoja sin importar si está en minúsculas o mayúsculas
+        try:
+            spreadsheet = client.open("power gym")
+        except:
+            spreadsheet = client.open("Power Gym")
+            
+        sheet = spreadsheet.worksheet("Socios")
         return sheet
     except Exception as e:
         print(f"Error al conectar con Google Sheets: {e}")
@@ -85,11 +91,11 @@ async def nuevo_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             # Obtener el ID siguiente basado en las filas existentes
             all_values = sheet.get_all_values()
-            next_id = len(all_values) - 4  # Descontando las 4 filas superiores de títulos/resumen
+            next_id = len(all_values) - 4  # Descontando las filas superiores de títulos
             if next_id < 1:
                 next_id = 1
 
-            # Estructura exacta de columnas: 
+            # Estructura exacta de columnas según tu diseño:
             # [id, nombre, telefono, foto_url, plan, monto, fecha_inicio, proximo_pago, estado_pago, asistencia, registrado_por][cite: 5]
             fila_nueva = [
                 next_id,
@@ -118,7 +124,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     encargado = (query.from_user.first_name or "ADMIN").upper()
     fecha_hoy = datetime.now().strftime("%Y-%m-%d")
-    sheet = conectar_sheets()
     
     if query.data == "registrar_asistencia":
         await query.edit_message_text(text=f"✅ Asistencia registrada por **{encargado}** el {fecha_hoy}.", parse_mode="Markdown")
