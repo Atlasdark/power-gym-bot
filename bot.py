@@ -42,7 +42,6 @@ SHEET_ID = os.environ.get("SHEET_ID", "1lB4AhcWawk3cSeBHGWXwQxZ3PvYgSsDtxKPscuI7
 TZ = ZoneInfo("America/Mexico_City")
 
 # ID de Telegram -> nombre EXACTO del dropdown "registrado_por" de la hoja.
-# Cada encargado manda /id al bot para saber su número.
 ENCARGADOS = {
     9243005111: "ADOLFO",
     # 222222222: "DIEGO",
@@ -55,6 +54,9 @@ PLANES = {"visita": ("Visita", 50), "semana": ("Semana", 150), "mes": ("Mes", 40
 FILA_INICIO = 6
 COL_ID, COL_NOMBRE = 2, 3  # B, C
 DIAS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+
+# Memoria temporal para la selección múltiple de asistencia: {(chat_id, message_id): set([id1, id2...])}
+ASISTENCIA_SELECCIONES = {}
 
 # ---------------------------------------------------------------- Utilidades
 _sh = None
@@ -379,8 +381,8 @@ AYUDA = (
     "/pago 3 mes – cobra (visita, semana o mes)\n"
     "/vencidos – vencidos y pendientes de pago\n\n"
     "ASISTENCIA\n"
-    "/asistencia – muestra lista de socios con botones\n"
-    "/asistencia 3 – registra asistencia por ID\n"
+    "/asistencia – lista con casillas y fecha actual\n"
+    "/asistencia 3 – registra asistencia directa por ID\n"
     "/hoy – quién ha llegado hoy\n"
     "/deshacer – borra la última asistencia (si fue hoy y tuya)\n\n"
     "ADMIN\n"
@@ -440,14 +442,14 @@ async def cmd_pago(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @autorizado
 async def cmd_asistencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Si pasa un ID por argumento, lo procesa directo
+    # Si pasa un ID por argumento, lo procesa directo como antes
     if pedir_id(context.args):
         r = await asyncio.to_thread(procesar_registro_asistencia, get_sh(), context.args[0], quien(update))
         if r is None:
             await update.message.reply_text(f"❌ No existe el socio con ID {context.args[0]}.")
             return
         if r["duplicada"]:
-            await update.message.reply_text(f"ℹ️ {r['nombre']} ya tenía asistencia hoy a las {r['hora']}. No se duplicó.")
+            await update.message.reply_text(f"ℹ️ {r['nombre']} ya tenía asistencia hoy a las {r['hora']}.")
             return
         lineas = [f"{'✅' if r['estatus'] == 'Al corriente' else '⚠️'} Asistencia de {r['nombre']} registrada.",
                   f"Membresía: {r['estatus']} (vence {r['proximo'] or 's/f'})"]
@@ -458,7 +460,7 @@ async def cmd_asistencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("\n".join(lineas))
         return
 
-    # Si no pasa argumentos, genera la botonera interactiva de socios activos
+    # Si no pasa argumentos, genera la lista interactiva con fecha y casillas
     def obtener_activos():
         sh = get_sh()
         return [s for s in socios_filas(sh.worksheet("Socios")) if s["estado"] == "Activo"]
@@ -468,12 +470,24 @@ async def cmd_asistencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ No hay socios activos registrados.")
         return
 
+    chat_id = update.effective_chat.id
+    hoy_str = ahora().strftime("%d/%m/%Y")
+    
     keyboard = []
     for s in socios_activos:
-        keyboard.append([InlineKeyboardButton(f"🟢 {s['nombre']} (ID {s['id']})", callback_data=f"asis_{s['id']}")])
+        keyboard.append([InlineKeyboardButton(f"⭕ {s['nombre']} (ID {s['id']})", callback_data=f"asis_tog_{s['id']}")])
+    
+    keyboard.append([InlineKeyboardButton("💾 Guardar asistencias seleccionadas", callback_data="asis_save")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("📋 **Selecciona al socio que llegó hoy:**", reply_markup=reply_markup, parse_mode="Markdown")
+    msg = await update.message.reply_text(
+        f"📅 **Fecha de hoy: {hoy_str}**\n📋 Toca los socios que llegaron y presiona Guardar:",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+    
+    # Inicializar el set de seleccionados vacío para este mensaje
+    ASISTENCIA_SELECCIONES[(chat_id, msg.message_id)] = set()
 
 
 @autorizado
@@ -612,33 +626,82 @@ async def cmd_corte(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @autorizado
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    await q.answer()
     
     # Manejo del botón de corte de caja
     if q.data == "ver_corte" and q.from_user.id == ADMIN_ID:
+        await q.answer()
         await q.message.reply_text(await _texto_corte("hoy"))
         return
 
-    # Manejo de los botones de asistencia interactiva
-    if q.data.startswith("asis_"):
-        socio_id = q.data.split("_")[1]
-        r = await asyncio.to_thread(procesar_registro_asistencia, get_sh(), socio_id, quien(update))
-        if not r:
-            await q.message.reply_text(f"❌ Error al registrar asistencia del socio ID {socio_id}.")
-            return
-        if r["duplicada"]:
-            await q.edit_message_text(text=f"ℹ️ {r['nombre']} ya tenía asistencia hoy a las {r['hora']}.")
-            return
+    # Manejo de casillas de verificación de asistencia
+    if q.data.startswith("asis_tog_"):
+        socio_id = q.data.split("_")[2]
+        key = (q.message.chat.id, q.message.message_id)
+        if key not in ASISTENCIA_SELECCIONES:
+            ASISTENCIA_SELECCIONES[key] = set()
         
-        texto_res = (
-            f"✅ **Asistencia registrada vía botón**\n"
-            f"👤 {r['nombre']} (ID {r['id']})\n"
-            f"Membresía: {r['estatus']} (vence {r['proximo'] or 's/f'})"
-        )
-        if r["pago"] == "Pendiente":
-            texto_res += "\n💳 Tiene el pago PENDIENTE."
+        selected = ASISTENCIA_SELECCIONES[key]
+        if socio_id in selected:
+            selected.remove(socio_id)
+        else:
+            selected.add(socio_id)
             
-        await q.edit_message_text(text=texto_res, parse_mode="Markdown")
+        def obtener_activos():
+            sh = get_sh()
+            return [s for s in socios_filas(sh.worksheet("Socios")) if s["estado"] == "Activo"]
+
+        socios_activos = await asyncio.to_thread(obtener_activos)
+        
+        keyboard = []
+        for s in socios_activos:
+            icono = "✅" if s["id"] in selected else "⭕"
+            keyboard.append([InlineKeyboardButton(f"{icono} {s['nombre']} (ID {s['id']})", callback_data=f"asis_tog_{s['id']}")])
+        
+        keyboard.append([InlineKeyboardButton("💾 Guardar asistencias seleccionadas", callback_data="asis_save")])
+        
+        hoy_str = ahora().strftime("%d/%m/%Y")
+        await q.edit_message_text(
+            text=f"📅 **Fecha de hoy: {hoy_str}**\n📋 Toca los socios que llegaron y presiona Guardar:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        await q.answer()
+        return
+
+    # Guardar las asistencias múltiples seleccionadas
+    if q.data == "asis_save":
+        key = (q.message.chat.id, q.message.message_id)
+        selected = ASISTENCIA_SELECCIONES.get(key, set())
+        
+        if not selected:
+            await q.answer("⚠️ No has seleccionado ningún socio.", show_alert=True)
+            return
+            
+        enc = quien(q.from_user)
+        sh = get_sh()
+        registrados = []
+        duplicados = []
+        
+        for socio_id in selected:
+            r = await asyncio.to_thread(procesar_registro_asistencia, sh, socio_id, enc)
+            if r:
+                if r["duplicada"]:
+                    duplicados.append(r["nombre"])
+                else:
+                    registrados.append(r["nombre"])
+                    
+        # Limpiar memoria de esta sesión
+        ASISTENCIA_SELECCIONES.pop(key, None)
+        
+        texto_fin = f"✅ **¡Asistencias guardadas con éxito!**\n"
+        if registrados:
+            texto_fin += f"• Registrados: {', '.join(registrados)}\n"
+        if duplicados:
+            texto_fin += f"• Ya tenían asistencia hoy: {', '.join(duplicados)}"
+            
+        await q.edit_message_text(text=texto_fin, parse_mode="Markdown")
+        await q.answer("¡Guardado correctamente!")
+        return
 
 
 async def on_error(update, context):
@@ -647,7 +710,7 @@ async def on_error(update, context):
 
 async def post_init(app):
     await app.bot.set_my_commands([
-        BotCommand("asistencia", "Registrar asistencia (botón o ID)"),
+        BotCommand("asistencia", "Registrar asistencia (lista con casillas)"),
         BotCommand("hoy", "Quién ha llegado hoy"),
         BotCommand("pago", "Cobrar: /pago ID visita|semana|mes"),
         BotCommand("nuevo", "Alta de socio"),
