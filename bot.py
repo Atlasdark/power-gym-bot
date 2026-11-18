@@ -49,6 +49,7 @@ COL_ID, COL_NOMBRE = 2, 3
 DIAS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
 
 ASISTENCIA_SELECCIONES = {}
+COBROS_SELECCIONES = {}
 
 # Estados para la conversación de registro (/nuevo)
 NOMBRE, TELEFONO, FOTO, PLAN = range(4)
@@ -325,7 +326,7 @@ def sync_vencidos():
             continue
         d = parse_fecha(s["proximo"])
         if d is None or d < hoy or s["pago"] == "Pendiente":
-            s["dias"] = (hoy - d).days if d else None
+            s["dias"] = (hoy - d).days if (d and d < hoy) else 0
             out.append(s)
     return out
 
@@ -405,8 +406,8 @@ AYUDA = (
     "/socio 3 – ficha del socio\n"
     "/telefono 3 8112345678 – cambia el teléfono\n\n"
     "PAGOS\n"
-    "/pago 3 mes – cobra (visita, semana o mes)\n"
-    "/pendientes – lista interactiva de cobros pendientes y vencidos\n"
+    "/cobros – lista interactiva para palomear cobros del día y atrasados\n"
+    "/pago 3 mes – cobra directo: visita, semana o mes\n"
     "/vencidos – lista rápida de vencidos\n\n"
     "ASISTENCIA\n"
     "/asistencia – lista con casillas y fecha actual\n"
@@ -435,10 +436,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(AYUDA, reply_markup=teclado)
 
 
-# ---------------------------------------------------------------- Reporte interactivo de pendientes
+# ---------------------------------------------------------------- Control de Cobros Interactivo (/cobros)
 @autorizado
-async def cmd_pendientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra reporte interactivo de pagos que vencen hoy y atrasados con botones de cobro."""
+async def cmd_cobros(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra lista interactiva con casillas para palomear cobros del día y atrasados."""
     ws = get_sh()
     socios = await asyncio.to_thread(socios_filas, ws.worksheet("Socios"))
     hoy = ahora().date()
@@ -448,12 +449,6 @@ async def cmd_pendientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if s["estado"] != "Activo":
             continue
         d = parse_fecha(s["proximo"])
-        
-        plan = s["plan"]
-        monto_txt = "$50" if plan == "Visita" else ("$150" if plan == "Semana" else ("$400" if plan == "Mes" else "Por definir"))
-        s["monto_txt"] = monto_txt
-        
-        # Si vence hoy, ya venció o tiene pago pendiente
         if (d is not None and d <= hoy) or s["pago"] == "Pendiente":
             dias_tarde = (hoy - d).days if (d is not None and d < hoy) else 0
             s["dias_tarde"] = dias_tarde
@@ -464,36 +459,39 @@ async def cmd_pendientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🎉 ¡Excelente! No hay socios pendientes de pago ni vencidos hoy.")
         return
 
-    lineas = ["📊 **PAGOS PENDIENTES Y VENCIDOS**\n"]
-    keyboard = []
+    chat_id = update.effective_chat.id
+    hoy_str = ahora().strftime("%d/%m/%Y")
     
-    for s in por_cobrar[:30]:
+    keyboard = []
+    for s in por_cobrar:
         if s["vence_hoy"]:
-            estado_str = "📅 Vence HOY"
+            estado_txt = "📅 Vence HOY"
         elif s["dias_tarde"] > 0:
-            estado_str = f"⚠️ Venció hace {s['dias_tarde']}d"
+            estado_txt = f"⚠️ Venció hace {s['dias_tarde']}d"
         else:
-            estado_str = "💳 Pago pendiente"
+            estado_txt = "💳 Pendiente"
             
-        lineas.append(f"• ID {s['id']} · **{s['nombre']}** | {s['plan']} ({s['monto_txt']}) — {estado_str}")
-        
         plan_lower = s["plan"].lower()
-        plan_key = "visita" if "visita" in plan_lower else ("semana" if "semana" in plan_lower else "mes")
-        plan_label = s["plan"] if s["plan"] in ["Visita", "Semana", "Mes"] else "Mes"
+        monto_txt = "$50" if "visita" in plan_lower else ("$150" if "semana" in plan_lower else "$400")
         
         keyboard.append([
             InlineKeyboardButton(
-                f"💰 Cobrar {plan_label} ({s['monto_txt']}) a {s['nombre']}",
-                callback_data=f"cobrar_rapido_{s['id']}_{plan_key}"
+                f"⭕ [ID {s['id']}] {s['nombre']} ({s['plan']} {monto_txt}) - {estado_txt}", 
+                callback_data=f"cobro_tog_{s['id']}"
             )
         ])
+    
+    keyboard.append([InlineKeyboardButton("💾 Marcar seleccionados como PAGADOS", callback_data="cobro_save")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "\n".join(lineas) + "\n\n👇 **Toca el botón del socio para registrar su pago:**",
+    msg = await update.message.reply_text(
+        f"📊 **CONTROL DE COBROS DEL DÍA: {hoy_str}**\n"
+        f"📋 Toca los socios que **ya pagaron** para seleccionarlos y presiona Guardar:",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
+    
+    COBROS_SELECCIONES[(chat_id, msg.message_id)] = set()
 
 
 # ---------------------------------------------------------------- Agregar ayudante (Admin)
@@ -756,10 +754,8 @@ async def cmd_vencidos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lineas = [f"⚠️ {len(res)} socios por cobrar:"]
     for s in res[:40]:
-        if s["dias"] is not None and s["dias"] > 0:
-            cuando = f"venció hace {s['dias']} d"
-        else:
-            cuando = f"vence {s['proximo'] or 's/f'}"
+        dias = s.get("dias", 0)
+        cuando = f"venció hace {dias} día(s)" if dias > 0 else f"vence {s['proximo'] or 's/f'}"
         extra = " · pago PENDIENTE" if s["pago"] == "Pendiente" else ""
         lineas.append(f"ID {s['id']} · {s['nombre']} · {cuando}{extra} · {s['tel'] or 's/n'}")
     await update.message.reply_text("\n".join(lineas))
@@ -824,34 +820,112 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(await _texto_corte("hoy"))
         return
 
-    # Cobro rápido desde el menú interactivo de /pendientes
-    if q.data.startswith("cobrar_rapido_"):
-        partes = q.data.replace("cobrar_rapido_", "").split("_")
-        socio_id = partes[0]
-        plan_key = partes[1]
+    # ------------------ Manejadores para el control interactivo de /cobros ------------------
+    if q.data.startswith("cobro_tog_"):
+        socio_id = q.data.replace("cobro_tog_", "")
+        key = (q.message.chat.id, q.message.message_id)
+        if key not in COBROS_SELECCIONES:
+            COBROS_SELECCIONES[key] = set()
         
-        encargado = quien(update) or "Admin"
-        r = await asyncio.to_thread(sync_pago, socio_id, plan_key, encargado)
-        
-        if r is None:
-            await q.answer("❌ No se encontró el socio.", show_alert=True)
-            return
+        selected = COBROS_SELECCIONES[key]
+        if socio_id in selected:
+            selected.remove(socio_id)
+        else:
+            selected.add(socio_id)
             
-        nombre, plan, monto, proximo = r
-        await q.answer(f"¡Cobro exitoso a {nombre}!", show_alert=True)
+        ws = get_sh()
+        socios = await asyncio.to_thread(socios_filas, ws.worksheet("Socios"))
+        hoy = ahora().date()
         
+        por_cobrar = []
+        for s in socios:
+            if s["estado"] != "Activo":
+                continue
+            d = parse_fecha(s["proximo"])
+            if (d is not None and d <= hoy) or s["pago"] == "Pendiente":
+                dias_tarde = (hoy - d).days if (d is not None and d < hoy) else 0
+                s["dias_tarde"] = dias_tarde
+                s["vence_hoy"] = (d == hoy)
+                por_cobrar.append(s)
+        
+        keyboard = []
+        for s in por_cobrar:
+            icono = "✅" if s['id'] in selected else "⭕"
+            if s["vence_hoy"]:
+                estado_txt = "📅 Vence HOY"
+            elif s["dias_tarde"] > 0:
+                estado_txt = f"⚠️ Venció hace {s['dias_tarde']}d"
+            else:
+                estado_txt = "💳 Pendiente"
+                
+            plan_lower = s["plan"].lower()
+            monto_txt = "$50" if "visita" in plan_lower else ("$150" if "semana" in plan_lower else "$400")
+            
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{icono} [ID {s['id']}] {s['nombre']} ({s['plan']} {monto_txt}) - {estado_txt}", 
+                    callback_data=f"cobro_tog_{s['id']}"
+                )
+            ])
+        
+        keyboard.append([InlineKeyboardButton("💾 Marcar seleccionados como PAGADOS", callback_data="cobro_save")])
+        
+        hoy_str = ahora().strftime("%d/%m/%Y")
         try:
             await q.edit_message_text(
-                text=f"✅ **¡Pago registrado con éxito!**\n\n"
-                     f"💰 **Socio:** {nombre}\n"
-                     f"📋 **Plan:** {plan} (${monto})\n"
-                     f"📅 **Próximo pago:** {proximo}\n"
-                     f"👤 **Cobrado por:** {encargado}",
+                text=f"📊 **CONTROL DE COBROS DEL DÍA: {hoy_str}**\n"
+                     f"📋 Toca los socios que **ya pagaron** para seleccionarlos y presiona Guardar:\n\n"
+                     f"📌 *Seleccionados:* {len(selected)} de {len(por_cobrar)}",
+                reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="Markdown"
             )
         except Exception:
             pass
+        await q.answer()
         return
+
+    if q.data == "cobro_save":
+        key = (q.message.chat.id, q.message.message_id)
+        selected = COBROS_SELECCIONES.get(key, set())
+        
+        if not selected:
+            await q.answer("⚠️ No has seleccionado ningún socio.", show_alert=True)
+            return
+            
+        enc = quien(update) or "Admin"
+        sh = get_sh()
+        ws_socios = sh.worksheet("Socios")
+        todos_socios = await asyncio.to_thread(socios_filas, ws_socios)
+        
+        pagados_ok = []
+        
+        def procesar_lote_cobros():
+            for socio_id in selected:
+                socio = next((s for s in todos_socios if s["id"] == socio_id), None)
+                if not socio:
+                    continue
+                plan_lower = socio["plan"].lower()
+                plan_key = "visita" if "visita" in plan_lower else ("semana" if "semana" in plan_lower else "mes")
+                sync_pago(socio_id, plan_key, enc)
+                pagados_ok.append(socio["nombre"])
+
+        await asyncio.to_thread(procesar_lote_cobros)
+        COBROS_SELECCIONES.pop(key, None)
+        
+        texto_res = (
+            f"✅ **¡Corte y pagos actualizados con éxito!**\n\n"
+            f"👤 **Total de socios que pagaron en este bloque:** {len(pagados_ok)}\n"
+            f"• Nombres: {', '.join(pagados_ok)}\n"
+            f"👨‍💼 **Registrado por:** {enc}"
+        )
+        
+        try:
+            await q.edit_message_text(text=texto_res, parse_mode="Markdown")
+        except Exception:
+            await q.message.reply_text(texto_res, parse_mode="Markdown")
+        await q.answer("¡Pagos guardados correctamente!")
+        return
+    # ---------------------------------------------------------------------------------------
 
     if q.data.startswith("asis_tog_"):
         socio_id = q.data.replace("asis_tog_", "")
@@ -972,8 +1046,9 @@ async def post_init(app):
     await app.bot.set_my_commands([
         BotCommand("asistencia", "Registrar asistencia (lista con casillas)"),
         BotCommand("hoy", "Quién ha llegado hoy"),
-        BotCommand("pendientes", "Cobros pendientes y vencidos (botones)"),
-        BotCommand("pago", "Cobrar: /pago ID visita|semana|mes"),
+        BotCommand("cobros", "Control de cobros del día con casillas"),
+        BotCommand("pendientes", "Reporte de pagos pendientes"),
+        BotCommand("pago", "Cobrar directo: /pago ID visita|semana|mes"),
         BotCommand("nuevo", "Alta de socio interactiva"),
         BotCommand("ayudante", "Registrar nuevo ayudante (admin)"),
         BotCommand("buscar", "Buscar socio por nombre o teléfono"),
@@ -1004,7 +1079,7 @@ def main():
     for nombre, f in [
         ("id", cmd_id), ("start", cmd_start), ("ayuda", cmd_start),
         ("pago", cmd_pago), ("asistencia", cmd_asistencia),
-        ("pendientes", cmd_pendientes), ("ayudante", cmd_ayudante),
+        ("cobros", cmd_cobros), ("pendientes", cmd_pendientes), ("ayudante", cmd_ayudante),
         ("deshacer", cmd_deshacer), ("hoy", cmd_hoy), ("buscar", cmd_buscar),
         ("socio", cmd_socio), ("vencidos", cmd_vencidos), ("telefono", cmd_telefono),
         ("baja", cmd_baja), ("alta", cmd_alta), ("corte", cmd_corte),
