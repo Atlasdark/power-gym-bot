@@ -669,6 +669,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         return
 
+    # Guardar las asistencias múltiples seleccionadas de golpe (Evita error 429)
     if q.data == "asis_save":
         key = (q.message.chat.id, q.message.message_id)
         selected = ASISTENCIA_SELECCIONES.get(key, set())
@@ -679,17 +680,53 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         enc = ENCARGADOS.get(q.from_user.id, "Admin")
         sh = get_sh()
+        ws_socios = sh.worksheet("Socios")
+        wa = sh.worksheet("Asistencias")
+        
+        todos_socios = await asyncio.to_thread(socios_filas, ws_socios)
+        rows_asist = await asyncio.to_thread(asistencias_rows, wa)
+        hoy_str = ahora().strftime("%Y-%m-%d")
+        
+        asistidos_hoy = {a["id"] for a in rows_asist if a["fecha"][:10] == hoy_str}
+        
+        nuevas_filas = []
         registrados = []
         duplicados = []
         
+        proxima_fila = rows_asist[-1]["fila"] + 1 if rows_asist else FILA_INICIO
+        
         for socio_id in selected:
-            r = await asyncio.to_thread(procesar_registro_asistencia, sh, socio_id, enc)
-            if r:
-                if r["duplicada"]:
-                    duplicados.append(r["nombre"])
-                else:
-                    registrados.append(r["nombre"])
-                    
+            socio = next((s for s in todos_socios if s["id"] == socio_id), None)
+            if not socio:
+                continue
+                
+            if socio_id in asistidos_hoy:
+                duplicados.append(socio["nombre"])
+                continue
+                
+            estatus = estatus_de(socio["proximo"])
+            nuevas_filas.append([
+                ahora().strftime("%Y-%m-%d %H:%M:%S"),
+                int(socio["id"]),
+                f'=IFERROR(VLOOKUP(C{proxima_fila},Socios!B$6:C$500,2,FALSE),"")',
+                enc,
+                estatus,
+            ])
+            registrados.append(socio["nombre"])
+            proxima_fila += 1
+            
+        if nuevas_filas:
+            fin_fila = proxima_fila - 1
+            inicio_fila = fin_fila - len(nuevas_filas) + 1
+            def escribir_lote():
+                wa.update(
+                    range_name=f"B{inicio_fila}:F{fin_fila}",
+                    values=nuevas_filas,
+                    value_input_option="USER_ENTERED",
+                )
+                sync_semana(sh)
+            await asyncio.to_thread(escribir_lote)
+            
         ASISTENCIA_SELECCIONES.pop(key, None)
         
         texto_fin = f"✅ **¡Asistencias guardadas con éxito!**\n"
