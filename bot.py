@@ -42,10 +42,6 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 SHEET_ID = os.environ.get("SHEET_ID", "1lB4AhcWawk3cSeBHGWXwQxZ3PvYgSsDtxKPscuI75IQ")
 TZ = ZoneInfo("America/Mexico_City")
 
-ENCARGADOS = {
-    9243005111: "ADOLFO",
-}
-
 PLANES = {"visita": ("Visita", 50), "semana": ("Semana", 150), "mes": ("Mes", 400)}
 
 FILA_INICIO = 6
@@ -157,6 +153,26 @@ def get_pagos_ws(sh):
         ws.append_row(["fecha_hora", "id_socio", "nombre", "plan", "monto", "registrado_por"])
         ws.freeze(rows=1)
         return ws
+
+
+def quien_por_id(uid):
+    if uid == ADMIN_ID:
+        return "ADMIN"
+    try:
+        sh = get_sh()
+        try:
+            ws = sh.worksheet("Encargados")
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title="Encargados", rows=100, cols=2)
+            ws.append_row(["Telegram ID", "Nombre"])
+            ws.append_row([str(ADMIN_ID), "ADMIN"])
+        rows = ws.get_all_values()[1:]
+        for r in rows:
+            if len(r) >= 2 and r[0].strip() == str(uid):
+                return r[1].strip()
+    except Exception:
+        pass
+    return ""
 
 
 # ---------------------------------------------------------------- Operaciones en la hoja
@@ -348,7 +364,7 @@ def autorizado(func):
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = update.effective_user.id
-        if uid not in ENCARGADOS and uid != ADMIN_ID:
+        if not quien_por_id(uid):
             await update.effective_message.reply_text(
                 f"⛔ No tienes permiso. Tu ID es {uid}; pásaselo al administrador."
             )
@@ -374,7 +390,7 @@ def solo_admin(func):
 
 
 def quien(update):
-    return ENCARGADOS.get(update.effective_user.id, "")
+    return quien_por_id(update.effective_user.id)
 
 
 def pedir_id(args):
@@ -390,13 +406,15 @@ AYUDA = (
     "/telefono 3 8112345678 – cambia el teléfono\n\n"
     "PAGOS\n"
     "/pago 3 mes – cobra (visita, semana o mes)\n"
-    "/vencidos – vencidos y pendientes de pago\n\n"
+    "/vencidos – vencidos y pendientes de pago\n"
+    "/pendientes – reporte de pagos de hoy y atrasados\n\n"
     "ASISTENCIA\n"
     "/asistencia – lista con casillas y fecha actual\n"
     "/asistencia 3 – registra asistencia directa por ID\n"
     "/hoy – quién ha llegado hoy\n"
     "/deshacer – borra la última asistencia (si fue hoy y tuya)\n\n"
     "ADMIN\n"
+    "/ayudante <ID> <Nombre> – agrega un ayudante nuevo\n"
     "/corte – ingresos de hoy · /corte semana\n"
     "/baja 3 · /alta 3 – desactiva o reactiva un socio\n"
     "/id – tu ID de Telegram"
@@ -417,10 +435,83 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(AYUDA, reply_markup=teclado)
 
 
+# ---------------------------------------------------------------- Reporte de pendientes
+@autorizado
+async def cmd_pendientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra reporte detallado de pagos que vencen hoy y atrasados con plan y monto."""
+    ws = get_sh()
+    socios = await asyncio.to_thread(socios_filas, ws.worksheet("Socios"))
+    hoy = ahora().date()
+    
+    hoy_vencen = []
+    atrasados = []
+    
+    for s in socios:
+        if s["estado"] != "Activo":
+            continue
+        d = parse_fecha(s["proximo"])
+        if d is None:
+            continue
+            
+        plan = s["plan"]
+        monto_txt = "$50" if plan == "Visita" else ("$150" if plan == "Semana" else ("$400" if plan == "Mes" else "Por definir"))
+        s["monto_txt"] = monto_txt
+        
+        if d == hoy:
+            hoy_vencen.append(s)
+        elif d < hoy or s["pago"] == "Pendiente":
+            dias_tarde = (hoy - d).days if d else 0
+            s["dias_tarde"] = dias_tarde
+            atrasados.append(s)
+            
+    lineas = ["📊 **REPORTE DE PAGOS Y VENCIMIENTOS**\n"]
+    
+    lineas.append(f"📅 **Vencen hoy ({len(hoy_vencen)}):**")
+    if hoy_vencen:
+        for s in hoy_vencen:
+            lineas.append(f"  • ID {s['id']} · **{s['nombre']}** | Plan: {s['plan']} ({s['monto_txt']}) | Tel: {s['tel'] or 's/tel'}")
+    else:
+        lineas.append("  *Ninguno para hoy.*")
+        
+    lineas.append("")
+    lineas.append(f"⚠️ **Atrasados / Pendientes de días anteriores ({len(atrasados)}):**")
+    if atrasados:
+        for s in atrasados:
+            dias = s.get("dias_tarde", 0)
+            detalle = f"venció hace {dias} día(s)" if dias > 0 else "Pago pendiente"
+            lineas.append(f"  • ID {s['id']} · **{s['nombre']}** — {detalle} | Plan: {s['plan']} ({s['monto_txt']})")
+    else:
+        lineas.append("  *¡Todo al corriente! No hay atrasados.*")
+        
+    await update.message.reply_text("\n".join(lineas), parse_mode="Markdown")
+
+
+# ---------------------------------------------------------------- Agregar ayudante (Admin)
+@solo_admin
+async def cmd_ayudante(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if len(args) < 2 or not args[0].isdigit():
+        await update.message.reply_text("⚠️ Uso correcto: /ayudante 123456789 NOMBRE")
+        return
+    uid_str = args[0]
+    nombre = " ".join(args[1:]).upper()
+    
+    sh = get_sh()
+    try:
+        ws = sh.worksheet("Encargados")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="Encargados", rows=100, cols=2)
+        ws.append_row(["Telegram ID", "Nombre"])
+        ws.append_row([str(ADMIN_ID), "ADMIN"])
+        
+    ws.append_row([uid_str, nombre])
+    await update.message.reply_text(f"✅ ¡Ayudante **{nombre}** (ID: {uid_str}) agregado con éxito y guardado permanentemente!")
+
+
 # ---------------------------------------------------------------- ConversationHandler para /nuevo
 async def nuevo_inicio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if uid not in ENCARGADOS and uid != ADMIN_ID:
+    if not quien_por_id(uid):
         await update.message.reply_text(f"⛔ No tienes permiso. Tu ID es {uid}.")
         return ConversationHandler.END
     await update.message.reply_text(
@@ -769,7 +860,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("⚠️ No has seleccionado ningún socio.", show_alert=True)
             return
             
-        enc = ENCARGADOS.get(q.from_user.id, "Admin")
+        enc = quien(update) or "Admin"
         sh = get_sh()
         ws_socios = sh.worksheet("Socios")
         wa = sh.worksheet("Asistencias")
@@ -844,6 +935,8 @@ async def post_init(app):
         BotCommand("hoy", "Quién ha llegado hoy"),
         BotCommand("pago", "Cobrar: /pago ID visita|semana|mes"),
         BotCommand("nuevo", "Alta de socio interactiva"),
+        BotCommand("pendientes", "Reporte de pagos de hoy y atrasados"),
+        BotCommand("ayudante", "Registrar nuevo ayudante (admin)"),
         BotCommand("buscar", "Buscar socio por nombre o teléfono"),
         BotCommand("socio", "Ficha de un socio"),
         BotCommand("vencidos", "Socios por cobrar"),
@@ -872,6 +965,7 @@ def main():
     for nombre, f in [
         ("id", cmd_id), ("start", cmd_start), ("ayuda", cmd_start),
         ("pago", cmd_pago), ("asistencia", cmd_asistencia),
+        ("pendientes", cmd_pendientes), ("ayudante", cmd_ayudante),
         ("deshacer", cmd_deshacer), ("hoy", cmd_hoy), ("buscar", cmd_buscar),
         ("socio", cmd_socio), ("vencidos", cmd_vencidos), ("telefono", cmd_telefono),
         ("baja", cmd_baja), ("alta", cmd_alta), ("corte", cmd_corte),
