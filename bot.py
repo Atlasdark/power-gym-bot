@@ -320,49 +320,25 @@ def sync_hoy():
 
 
 def sync_vencidos():
+    """Devuelve todos los socios con pago Pendiente y calcula el atraso desde fecha_inicio."""
     ws = get_sh().worksheet("Socios")
     hoy = ahora().date()
     out = []
-    
-    for s in socios_filas(ws):
-        if s["estado"] != "Activo":
-            continue
-            
-        # Revisa estrictamente columna J ("Pendiente") de la fila 6 en adelante
-        if s["pago"].lower() == "pendiente":
-            d_proximo = parse_fecha(s["proximo"])
-            
-            if d_proximo:
-                dias_tarde = (hoy - d_proximo).days
-                s["fecha_vencimiento_real"] = d_proximo
-                s["dias"] = max(0, dias_tarde)
-                out.append(s)
-            else:
-                d_inicio = parse_fecha(s["inicio"])
-                if d_inicio:
-                    plan_lower = s["plan"].lower()
-                    if "semana" in plan_lower:
-                        f_venc = d_inicio + timedelta(days=7)
-                    elif "mes" in plan_lower:
-                        try:
-                            f_venc = d_inicio.replace(month=d_inicio.month + 1 if d_inicio.month < 12 else 1, 
-                                                     year=d_inicio.year if d_inicio.month < 12 else d_inicio.year + 1)
-                        except ValueError:
-                            f_venc = d_inicio + timedelta(days=30)
-                    else:
-                        f_venc = d_inicio
-                    
-                    dias_tarde = (hoy - f_venc).days
-                    s["fecha_vencimiento_real"] = f_venc
-                    s["dias"] = max(0, dias_tarde)
-                    out.append(s)
-                else:
-                    s["fecha_vencimiento_real"] = hoy
-                    s["dias"] = 0
-                    out.append(s)
-                    
-    return out
 
+    for s in socios_filas(ws):
+        # El estado del pago es el único filtro: si está Pagado, no se muestra.
+        if s["pago"].strip().lower() != "pendiente":
+            continue
+
+        # La fecha de inicio (columna H de la hoja) es el día en que debió pagar.
+        d_inicio = parse_fecha(s["inicio"])
+        s["fecha_vencimiento_real"] = d_inicio
+        s["dias"] = max(0, (hoy - d_inicio).days) if d_inicio else 0
+        out.append(s)
+
+    # Primero los que llevan más días pendientes.
+    out.sort(key=lambda s: (s["dias"], s["nombre"].lower()), reverse=True)
+    return out
 
 def sync_set(socio_id, columna, valor):
     ws = get_sh().worksheet("Socios")
@@ -890,27 +866,45 @@ async def cmd_socio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_vencidos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     res = await asyncio.to_thread(sync_vencidos)
     if not res:
-        await update.message.reply_text("🎉 No hay socios vencidos ni pendientes.")
+        await update.message.reply_text("🎉 No hay socios con pago pendiente.")
         return
-    lineas = [f"⚠️ **{len(res)} socios por cobrar:**\n"]
-    
-    for s in res[:40]:
-        f_venc = s.get("fecha_vencimiento_real")
-        dias = s.get("dias", 0)
-        f_venc_str = f_venc.strftime("%Y-%m-%d") if f_venc else "s/f"
-        
-        if dias > 0:
-            cuando = f"venció el {f_venc_str} y al día de hoy lleva {dias} día(s) de atraso"
-        elif dias == 0:
-            cuando = f"vence HOY ({f_venc_str})"
-        else:
-            cuando = f"vence el {f_venc_str}"
-            
-        extra = f" · Plan: {s['plan']}"
-        lineas.append(f"• ID {s['id']} · **{s['nombre']}** — {cuando}{extra} | Tel: {s['tel'] or 's/n'}")
-        
-    await update.message.reply_text("\n".join(lineas), parse_mode="Markdown")
 
+    hoy_str = ahora().strftime("%d/%m/%Y")
+    lineas = [
+        f"⚠️ **SOCIOS CON PAGO PENDIENTE: {len(res)}**",
+        f"📅 Fecha de revisión: {hoy_str}",
+        "El atraso se cuenta desde la fecha de inicio registrada.\\n",
+    ]
+
+    for s in res:
+        f_inicio = s.get("fecha_vencimiento_real")
+        f_inicio_str = f_inicio.strftime("%d/%m/%Y") if f_inicio else "fecha no registrada"
+        dias = s.get("dias", 0)
+
+        if f_inicio is None:
+            detalle = "no se pudo calcular el atraso (falta fecha de inicio)"
+        elif dias > 0:
+            detalle = f"pendiente desde el {f_inicio_str} — **{dias} día(s) de atraso**"
+        else:
+            detalle = f"pendiente desde hoy ({f_inicio_str}) — **0 días de atraso**"
+
+        lineas.append(
+            f"• ID {s['id']} · **{s['nombre']}** — {detalle} "
+            f"| Plan: {s['plan']} | Tel: {s['tel'] or 's/n'}"
+        )
+
+    # Telegram limita cada mensaje; se divide el reporte sin omitir socios.
+    mensaje = ""
+    for linea in lineas:
+        candidato = f"{mensaje}\\n{linea}" if mensaje else linea
+        if len(candidato) > 3900:
+            await update.message.reply_text(mensaje, parse_mode="Markdown")
+            mensaje = linea
+        else:
+            mensaje = candidato
+
+    if mensaje:
+        await update.message.reply_text(mensaje, parse_mode="Markdown")
 
 @solo_admin
 async def cmd_baja(update: Update, context: ContextTypes.DEFAULT_TYPE):
