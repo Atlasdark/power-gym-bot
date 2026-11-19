@@ -101,7 +101,7 @@ def fila_libre(ws, col):
 
 
 def socios_filas(ws):
-    """Lee todos los socios de forma segura soportando cualquier formato de ID."""
+    """Lee todos los socios estrictamente desde la fila 6 (B6:O1000)."""
     out = []
     try:
         rows = ws.get(f"B{FILA_INICIO}:O1000")
@@ -328,9 +328,9 @@ def sync_vencidos():
         if s["estado"] != "Activo":
             continue
             
-        # Revisamos estrictamente si en la columna J (pago) dice "Pendiente"
+        # Revisa estrictamente columna J ("Pendiente")
         if s["pago"].lower() == "pendiente":
-            # Tomamos la fecha de la columna H (proximo)
+            # Toma la fecha de la columna H (próximo / vencimiento)
             d_proximo = parse_fecha(s["proximo"])
             
             if d_proximo:
@@ -339,7 +339,6 @@ def sync_vencidos():
                 s["dias"] = max(0, dias_tarde)
                 out.append(s)
             else:
-                # Si no hay fecha legible en H, usamos la fecha de inicio como referencia
                 d_inicio = parse_fecha(s["inicio"])
                 if d_inicio:
                     plan_lower = s["plan"].lower()
