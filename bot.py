@@ -1,4 +1,4 @@
-    import os
+import os
 import json
 import asyncio
 import logging
@@ -1236,3 +1236,4 @@ def main():
 
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
+    main()
