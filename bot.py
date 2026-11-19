@@ -487,6 +487,7 @@ AYUDA = (
     "PAGOS\n"
     "/cobros – control de cobros del día con casillas\n"
     "/pendientes – reporte de pagos pendientes\n"
+    "/pagoshoy – quién pagó hoy y cuánto ingresó\n"
     "/pago 3 mes – cobra directo: visita, semana o mes\n"
     "/vencidos – lista rápida de vencidos\n\n"
     "ASISTENCIA\n"
