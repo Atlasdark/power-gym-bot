@@ -872,31 +872,33 @@ async def cmd_vencidos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hoy_str = ahora().strftime("%d/%m/%Y")
     lineas = [
         f"⚠️ **SOCIOS CON PAGO PENDIENTE: {len(res)}**",
-        f"📅 Fecha de revisión: {hoy_str}",
-        "El atraso se cuenta desde la fecha de inicio registrada.\\n",
+        f"📅 Revisión: {hoy_str}",
+        "━━━━━━━━━━━━━━━━━━",
     ]
 
     for s in res:
         f_inicio = s.get("fecha_vencimiento_real")
-        f_inicio_str = f_inicio.strftime("%d/%m/%Y") if f_inicio else "fecha no registrada"
+        f_inicio_str = f_inicio.strftime("%d/%m/%Y") if f_inicio else "Sin fecha"
         dias = s.get("dias", 0)
 
         if f_inicio is None:
-            detalle = "no se pudo calcular el atraso (falta fecha de inicio)"
+            detalle = "Atraso no calculable"
         elif dias > 0:
-            detalle = f"pendiente desde el {f_inicio_str} — **{dias} día(s) de atraso**"
+            detalle = f"🔴 {dias} día(s) de atraso"
         else:
-            detalle = f"pendiente desde hoy ({f_inicio_str}) — **0 días de atraso**"
+            detalle = "🟡 Vence hoy · 0 días de atraso"
 
-        lineas.append(
-            f"• ID {s['id']} · **{s['nombre']}** — {detalle} "
-            f"| Plan: {s['plan']} | Tel: {s['tel'] or 's/n'}"
-        )
+        lineas.extend([
+            f"👤 **{s['nombre']}**",
+            f"   📆 Fecha de pago: {f_inicio_str}",
+            f"   {detalle}",
+            "──────────────────",
+        ])
 
-    # Telegram limita cada mensaje; se divide el reporte sin omitir socios.
+    # Dividir el reporte para respetar el límite de Telegram sin omitir socios.
     mensaje = ""
     for linea in lineas:
-        candidato = f"{mensaje}\\n{linea}" if mensaje else linea
+        candidato = f"{mensaje}\n{linea}" if mensaje else linea
         if len(candidato) > 3900:
             await update.message.reply_text(mensaje, parse_mode="Markdown")
             mensaje = linea
