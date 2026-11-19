@@ -382,6 +382,31 @@ def sync_corte(modo):
     return d, total, n, por
 
 
+
+def sync_pagos_hoy():
+    """Detalle de los pagos registrados durante el día actual."""
+    sh = get_sh()
+    hoy = ahora().date()
+    pagos = []
+    total = 0.0
+
+    for r in get_pagos_ws(sh).get_all_values()[1:]:
+        r = list(r) + [""] * (6 - len(r))
+        fecha = parse_fecha(r[0])
+        if fecha != hoy:
+            continue
+        monto = num(r[4])
+        total += monto
+        pagos.append({
+            "fecha": r[0],
+            "nombre": r[2] or "Socio sin nombre",
+            "plan": r[3] or "Plan no registrado",
+            "monto": monto,
+            "encargado": r[5] or "Sin registrar",
+        })
+
+    return pagos, total
+
 def sync_inactividad():
     """Socios activos y días desde su última asistencia."""
     sh = get_sh()
@@ -1063,6 +1088,41 @@ async def _texto_corte(modo):
     return "\n".join(lineas)
 
 
+@autorizado
+async def cmd_pagos_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pagos, total = await asyncio.to_thread(sync_pagos_hoy)
+    hoy_txt = ahora().strftime("%d/%m/%Y")
+
+    if not pagos:
+        await update.effective_message.reply_text(
+            f"💰 **PAGOS DE HOY · POWER GYM**\\n"
+            f"📅 {hoy_txt}\\n"
+            "━━━━━━━━━━━━━━━━━━\\n"
+            "Todavía no hay pagos registrados hoy.",
+            parse_mode="Markdown",
+        )
+        return
+
+    lineas = [
+        "💰 **PAGOS DE HOY · POWER GYM**",
+        f"📅 {hoy_txt}",
+        f"👥 Socios que pagaron: **{len(pagos)}**",
+        f"💵 Total recibido: **${total:,.2f}**",
+        "━━━━━━━━━━━━━━━━━━",
+    ]
+
+    for pago in pagos:
+        hora_txt = pago["fecha"][11:16] if len(pago["fecha"]) >= 16 else ""
+        lineas.extend([
+            f"👤 **{pago['nombre']}**",
+            f"   💳 {pago['plan']} · **${pago['monto']:,.2f}**",
+            f"   🕒 {hora_txt or 'Hora no registrada'} · {pago['encargado']}",
+            "──────────────────",
+        ])
+
+    await enviar_reporte_largo(update, lineas)
+
+
 @solo_admin
 async def cmd_corte(update: Update, context: ContextTypes.DEFAULT_TYPE):
     modo = context.args[0].lower() if context.args else "hoy"
@@ -1328,6 +1388,7 @@ async def post_init(app):
         BotCommand("ayudante", "Registrar nuevo ayudante (admin)"),
         BotCommand("vencidos", "Socios por cobrar"),
         BotCommand("deshacer", "Borrar última asistencia"),
+        BotCommand("pagoshoy", "Quién pagó hoy y cuánto"),
         BotCommand("corte", "Corte de caja (admin)"),
         BotCommand("start", "Menú de ayuda"),
     ])
@@ -1358,6 +1419,7 @@ def main():
         ("hoy", cmd_hoy), ("inactividad", cmd_inactividad),
         ("socio", cmd_socio), ("buscar", cmd_socio),
         ("vencidos", cmd_vencidos), ("baja", cmd_baja), ("alta", cmd_alta),
+        ("pagoshoy", cmd_pagos_hoy),
         ("corte", cmd_corte),
     ]:
         app.add_handler(CommandHandler(nombre, f))
