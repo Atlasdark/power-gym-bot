@@ -328,9 +328,8 @@ def sync_vencidos():
         if s["estado"] != "Activo":
             continue
             
-        # Revisa estrictamente columna J ("Pendiente")
+        # Revisa estrictamente columna J ("Pendiente") de la fila 6 en adelante
         if s["pago"].lower() == "pendiente":
-            # Toma la fecha de la columna H (próximo / vencimiento)
             d_proximo = parse_fecha(s["proximo"])
             
             if d_proximo:
